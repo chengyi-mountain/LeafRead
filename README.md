@@ -42,6 +42,10 @@
 
 「拓展书库」里点某本外部书目时，也会弹同样的三选一：**从手机选文件 / 粘贴正文 / 从网址导入**。
 
+**中文 TXT 的编码是自动识别的**：带 BOM 的 UTF-8、不带 BOM 的 UTF-16，以及 GBK / GB18030（番茄小说、TXT 下载站常见的编码）都能正确解码，不会再出现满屏方块或「锟斤拷」式乱码。
+
+**大文件也能导入**：正文存进浏览器的 IndexedDB，只有书名、封面、章节数这类元信息留在 localStorage（后者通常只有 5 MB 配额，装不下整本小说）。实测 8.6 MB 的中文 TXT 能完整导入并打开，导入后 localStorage 占用仍不到 1 KB。
+
 > 关于「从网址导入」：静态网页没有后端，浏览器同源策略（CORS）会挡掉大多数第三方站点的正文抓取，所以它会经常失败。**本地文件导入是更可靠的方式**。
 
 ## 🔍 搜索范围（重要）
@@ -55,7 +59,7 @@
 
 | 格式 | 状态 | 说明 |
 |---|---|---|
-| TXT / Markdown | ✅ | 自动按空行与“第 X 章”标题切分章节 |
+| TXT / Markdown | ✅ | 自动按空行与“第 X 章”标题切分章节；TXT 自动识别 UTF-8 / UTF-16 / GBK 编码 |
 | HTML / HTM | ✅ | 自动剥离标签、提取正文 |
 | EPUB | ✅ | 内置原生 ZIP 解压 + 读取 OPF 的 spine 顺序，按真实章节结构导入 |
 | DOCX | ✅ | 读取 `word/document.xml` 正文段落 |
@@ -95,8 +99,9 @@
 
 - 纯 HTML / CSS / JavaScript（ES6+），零第三方库、零构建步骤
 - 分页用 CSS 多列（`column-width` + `scrollWidth` 计算页数），`transform` 整页平移
-- 数据持久化：localStorage（`reader_state_v2`、`reader_settings_v2`、`reader_bookmarks_v2`、`reader_highlights_v2`、`reader_notes_v2`、`reader_stats_v2` …）
-- 文件解析：`DecompressionStream` 原生解压 + 正则提取 XML/HTML 文本
+- 数据持久化：localStorage（`reader_state_v2`、`reader_settings_v2`、`reader_bookmarks_v2`、`reader_highlights_v2`、`reader_notes_v2`、`reader_stats_v2` …）；**导入书籍的正文走 IndexedDB**（`leafread_books_v1`），localStorage 只留元信息
+- 文件解析：`DecompressionStream` 原生解压 + 正则提取 XML/HTML 文本；TXT 用 BOM 检测 + 严格 UTF-8 试解 + GB18030 回退的编码识别
+- 目录分批渲染：一次 300 章，几千章的大书也不会卡
 - 无障碍与移动端：触摸手势、点击热区、安全区适配
 
 ## 🐞 已知限制
@@ -105,6 +110,8 @@
 - 内置英文公版书正文在个别位置存在**单词间空格丢失**（原始文本换行拼接遗留），属内容数据问题而非解析缺陷
 - 《德古拉》《白鲸记》存放在 `books/` 目录，本地只拷 `reader.html` 时无法打开这两本
 - 搜索只覆盖本机书库，不做全网检索（无后端 + CORS 限制，见上文「搜索范围」节）
+- 导入书的正文存在 IndexedDB 里，所以「备份导出」的 JSON **不含导入书的正文**（只有元信息），换设备请重新导入原文件
+- iOS Safari 的存储配额比桌面浏览器小，单本超过约 100 MB 的文件仍可能存不下（正常小说远小于此）；浏览器「清除网站数据」会把导入的书和阅读进度一起清掉
 - 阅读数据存在浏览器本地，换浏览器 / 清缓存会丢失，重要数据请用「备份导出」留存
 - 微信内置浏览器内核较旧，若打开后白屏，请点右上角「…」→ 在浏览器打开
 

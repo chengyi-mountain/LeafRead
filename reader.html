@@ -226,7 +226,14 @@ input, textarea, select { font:inherit; color:inherit; }
   padding:0 4px 8px; min-height:16px;
 }
 .shelf-import-row { display:flex; gap:10px; justify-content:center; margin:12px 0 4px; flex-wrap:wrap; }
-.shelf-import-row .discover-btn { flex:0 1 auto; }
+.shelf-import-row .discover-btn { flex:0 1 auto; margin-top:0; }
+/* 全站通栏那条 .discover-btn span{display:none} 会把这里的中文压掉，单独覆盖回来 */
+.shelf-import-row .discover-btn span { display:inline !important; white-space:nowrap; }
+@media (max-width: 430px) {
+  .shelf-import-row { gap:8px; }
+  .shelf-import-row .discover-btn { padding:9px 12px; font-size:12.5px; }
+  #btnDiscover { margin-top:8px; }
+}
 .shelf-ext-links { margin:18px auto 0; max-width:520px; text-align:left; }
 .shelf-ext-hint { font-size:12.5px; line-height:1.7; color:var(--text-sub); margin-bottom:10px; text-align:center; }
 .shelf-ext-btns { display:flex; flex-wrap:wrap; gap:8px; justify-content:center; }
@@ -1498,6 +1505,12 @@ function openBook(book) {
     loadLazyBook(book).then(() => openBookNow(book)).catch(() => {});
     return;
   }
+  // 正文存在 IndexedDB 里：打开时再取
+  if (book.storedIn === 'idb' && !(book.chapters && book.chapters.length)) {
+    loadIdbBook(book).then(() => openBookNow(book))
+      .catch(err => toast('《' + book.title + '》打不开：' + (err && err.message ? err.message : '读取失败'), 'error', 4200));
+    return;
+  }
   openBookNow(book);
 }
 
@@ -1751,19 +1764,37 @@ function renderSidebarFooter(mode) {
 function renderTOC(body) {
   const ul = document.createElement('ul');
   ul.className = 'chapter-list';
-  const prog = getProgress(state.currentBook.id);
-  state.currentBook.chapters.forEach((ch, i) => {
-    const li = document.createElement('li');
-    if (i === state.currentChapter) li.className = 'active';
-    const itemProg = state.progress[state.currentBook.id + '_ch_' + i];
-    li.innerHTML = `<div class="toc-item-progress ${itemProg?'read':''}">
-      <span class="progress-dot"></span>
-      <span class="ch-text">${escapeHtml(ch.title || ('第 '+(i+1)+' 章'))}</span>
-    </div>`;
-    li.onclick = () => { renderChapter(i, true); closeSidebar(); };
-    ul.appendChild(li);
-  });
+  const book = state.currentBook;
+  const total = book.chapters.length;
+  const BATCH = 300;          // 一次渲染 300 章，避免几千章的目录卡死
+  let shown = 0;
+
+  const moreBtn = document.createElement('button');
+  moreBtn.className = 'reset-btn';
+  moreBtn.style.marginTop = '8px';
+
+  function appendBatch() {
+    const end = Math.min(total, shown + BATCH);
+    for (let i = shown; i < end; i++) {
+      const ch = book.chapters[i];
+      const li = document.createElement('li');
+      if (i === state.currentChapter) li.className = 'active';
+      const itemProg = state.progress[book.id + '_ch_' + i];
+      li.innerHTML = `<div class="toc-item-progress ${itemProg?'read':''}">
+        <span class="progress-dot"></span>
+        <span class="ch-text">${escapeHtml(ch.title || ('第 '+(i+1)+' 章'))}</span>
+      </div>`;
+      li.onclick = () => { renderChapter(i, true); closeSidebar(); };
+      ul.appendChild(li);
+    }
+    shown = end;
+    if (shown >= total) { moreBtn.remove(); }
+    else { moreBtn.textContent = `继续加载（已显示 ${shown} / ${total} 章）`; }
+  }
+
+  appendBatch();
   body.appendChild(ul);
+  if (shown < total) { moreBtn.onclick = appendBatch; body.appendChild(moreBtn); }
 }
 
 // Settings panel
@@ -2349,20 +2380,38 @@ async function handleFiles(fileList, progressEl, progressText) {
   const imported = JSON.parse(localStorage.getItem('reader_imported_books_v2') || '[]');
   let okCount = 0;
   const failed = [];
+  const tooBig = [];
 
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
     if (progressText) progressText.textContent = `正在处理: ${file.name} (${i + 1}/${files.length})`;
     try {
       const book = await parseFile(file);
-      if (book) {
-        book.id = 'imp_' + Date.now() + '_' + i;
-        book.imported = true;
-        if (!book.category) book.category = guessCategory(book);
-        imported.push(book);
+      if (!book) { failed.push(file.name); continue; }
+      book.id = 'imp_' + Date.now() + '_' + i;
+      book.imported = true;
+      if (!book.category) book.category = guessCategory(book);
+
+      // 正文一律先尝试放 IndexedDB（localStorage 只有约 5MB，装不下整本小说）
+      let storedInIdb = false;
+      try {
+        await idbPutBook(book);
+        storedInIdb = true;
+      } catch (e) {
+        console.warn('IndexedDB 存入失败，回退 localStorage', e);
+      }
+
+      if (storedInIdb) {
+        imported.push(bookMetaOnly(book));
         okCount++;
       } else {
-        failed.push(file.name);
+        const payload = JSON.stringify(imported.concat([book]));
+        if (payload.length > 4500000) {
+          tooBig.push(file.name + '（' + (file.size / 1048576).toFixed(1) + ' MB）');
+          continue;
+        }
+        imported.push(book);
+        okCount++;
       }
     } catch (e) {
       console.error('Parse error', e);
@@ -2374,15 +2423,20 @@ async function handleFiles(fileList, progressEl, progressText) {
   try {
     localStorage.setItem('reader_imported_books_v2', JSON.stringify(imported));
   } catch (e) {
-    toast('本机存储空间不足，导入的书籍没有保存下来', 'error');
+    toast('浏览器本地存储写不进去，导入失败', 'error', 4000);
     if (progressEl) progressEl.classList.remove('show');
     return;
   }
   saveState();
   initBooks();
   if (progressEl) progressEl.classList.remove('show');
-  if (okCount) toast(`成功导入 ${okCount} 本书` + (failed.length ? `，${failed.length} 个文件解析失败` : ''), 'success');
-  else toast('这些文件都解析失败，请换 TXT / EPUB / DOCX 再试', 'error');
+  if (okCount) {
+    toast(`成功导入 ${okCount} 本书` + (failed.length ? `，${failed.length} 个解析失败` : ''), 'success');
+  }
+  if (tooBig.length) {
+    toast('这几个文件太大、浏览器存不下：' + tooBig.join('、') + '。建议先切成小份再导入', 'error', 6000);
+  }
+  if (!okCount && !tooBig.length) toast('这些文件都解析失败，请换 TXT / EPUB / DOCX 再试', 'error');
   renderBookshelf();
 }
 
@@ -2416,20 +2470,135 @@ async function extractEpubText(buffer) {
   return text;
 }
 
+/* ---------- 文本编码识别（中文 TXT 常见 GBK / UTF-16 / BOM） ---------- */
+function decodeTextSmart(buffer) {
+  const bytes = new Uint8Array(buffer);
+  if (!bytes.length) return '';
+  // BOM 优先
+  if (bytes[0] === 0xFF && bytes[1] === 0xFE) return new TextDecoder('utf-16le').decode(bytes.subarray(2));
+  if (bytes[0] === 0xFE && bytes[1] === 0xFF) return new TextDecoder('utf-16be').decode(bytes.subarray(2));
+  if (bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) return new TextDecoder('utf-8').decode(bytes.subarray(3));
+  // 无 BOM 的 UTF-16：中文码位高位字节集中在 0x4E–0x9F，
+  // 纯中文文本里几乎没有 0x00，所以不能靠空字节判断，要看“高位字节分布”
+  const probeLen = Math.min(bytes.length - (bytes.length % 2), 8192);
+  let pairs = 0, leCJK = 0, beCJK = 0, zeroEven = 0;
+  for (let i = 0; i + 1 < probeLen; i += 2) {
+    pairs++;
+    if (bytes[i + 1] >= 0x4E && bytes[i + 1] <= 0x9F) leCJK++;   // LE 的高位在奇数位
+    if (bytes[i] >= 0x4E && bytes[i] <= 0x9F) beCJK++;           // BE 的高位在偶数位
+    if (bytes[i] === 0) zeroEven++;                              // 纯 ASCII 的 UTF-16LE 特征
+  }
+  if (pairs > 0) {
+    const le = leCJK / pairs, be = beCJK / pairs;
+    if (le > 0.65 && le > be) return new TextDecoder('utf-16le').decode(bytes);
+    if (be > 0.65 && be > le) return new TextDecoder('utf-16be').decode(bytes);
+    if (pairs > 8 && zeroEven / pairs > 0.3) return new TextDecoder('utf-16le').decode(bytes);
+  }
+  // 严格 UTF-8：不合法就说明不是 UTF-8
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch (e) { /* 继续 */ }
+  // 回退 GB18030（兼容 GBK / GB2312，覆盖绝大多数中文 TXT）
+  try {
+    return new TextDecoder('gb18030').decode(bytes);
+  } catch (e) { /* 继续 */ }
+  return new TextDecoder('utf-8').decode(bytes);
+}
+
+function readTextFileSmart(file) {
+  return file.arrayBuffer().then(buf => decodeTextSmart(buf));
+}
+
+/* ---------- 大书存储：IndexedDB（localStorage 只有 5MB，装不下整本小说） ---------- */
+const BOOK_DB_NAME = 'leafread_books_v1';
+const BOOK_STORE = 'books';
+let bookDBPromise = null;
+const bookLoading = {};
+
+function openBookDB() {
+  if (!('indexedDB' in window) || !window.indexedDB) return Promise.reject(new Error('本浏览器不支持 IndexedDB'));
+  if (bookDBPromise) return bookDBPromise;
+  bookDBPromise = new Promise((resolve, reject) => {
+    let req;
+    try { req = indexedDB.open(BOOK_DB_NAME, 1); } catch (e) { reject(e); return; }
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(BOOK_STORE)) db.createObjectStore(BOOK_STORE, { keyPath: 'id' });
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error || new Error('IndexedDB 打开失败'));
+    req.onblocked = () => reject(new Error('IndexedDB 被其他标签页占用'));
+  });
+  return bookDBPromise;
+}
+
+function idbPutBook(book) {
+  return openBookDB().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(BOOK_STORE, 'readwrite');
+    const st = tx.objectStore(BOOK_STORE);
+    const req = st.put({ id: book.id, title: book.title, chapters: book.chapters, savedAt: Date.now() });
+    req.onsuccess = () => resolve(true);
+    req.onerror = () => reject(req.error || new Error('写入失败'));
+    tx.onabort = () => reject(tx.error || new Error('写入被中断（可能是空间不足）'));
+  }));
+}
+
+function idbGetBook(id) {
+  return openBookDB().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(BOOK_STORE, 'readonly');
+    const req = tx.objectStore(BOOK_STORE).get(id);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error || new Error('读取失败'));
+  }));
+}
+
+function idbDeleteBook(id) {
+  return openBookDB().then(db => new Promise((resolve) => {
+    const tx = db.transaction(BOOK_STORE, 'readwrite');
+    const req = tx.objectStore(BOOK_STORE).delete(id);
+    req.onsuccess = () => resolve(true);
+    req.onerror = () => resolve(false);
+  })).catch(() => false);
+}
+
+// 只保留元信息，正文交给 IndexedDB
+function bookMetaOnly(book) {
+  const meta = {};
+  Object.keys(book).forEach(k => { if (k !== 'chapters') meta[k] = book[k]; });
+  if (meta.coverData && meta.coverData.length > 200000) delete meta.coverData;
+  meta.chapterCount = (book.chapters || []).length;
+  meta.storedIn = 'idb';
+  return meta;
+}
+
+function loadIdbBook(book) {
+  if (bookLoading[book.id]) return bookLoading[book.id];
+  showLazyHint(book.title);
+  bookLoading[book.id] = idbGetBook(book.id).then(d => {
+    hideLazyHint();
+    if (!d || !d.chapters || !d.chapters.length) {
+      throw new Error('本机找不到这本书的正文，可能被浏览器清理了，请重新导入');
+    }
+    book.chapters = d.chapters;
+    return book;
+  }).catch(e => {
+    hideLazyHint();
+    delete bookLoading[book.id];
+    throw e;
+  });
+  return bookLoading[book.id];
+}
+
 function parseFile(file) {
   return new Promise(async (resolve, reject) => {
     const name = file.name;
     const ext = name.split('.').pop().toLowerCase();
     
     if (ext === 'txt') {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const text = reader.result;
+      readTextFileSmart(file).then(text => {
         const chapters = splitTextIntoChapters(text);
         resolve({ title: name.replace(/\.txt$/i,''), author: '佚名', cover:'imported', format:'txt', lang: detectLang(text), chapters });
-      };
-      reader.onerror = reject;
-      reader.readAsText(file, 'UTF-8');
+      }).catch(reject);
     } else if (ext === 'epub') {
       // EPUB = ZIP 包，按 OPF spine 顺序读取正文
       try {
@@ -2446,25 +2615,18 @@ function parseFile(file) {
         });
       } catch (e) { reject(e); }
     } else if (ext === 'html' || ext === 'htm') {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const text = reader.result.replace(/<[^>]+>/g, '\n').replace(/\n{3,}/g,'\n\n');
+      readTextFileSmart(file).then(raw => {
+        const text = raw.replace(/<[^>]+>/g, '\n').replace(/\n{3,}/g,'\n\n');
         const chapters = splitTextIntoChapters(text);
         resolve({ title: name.replace(/\.html?$/i,''), author:'佚名', cover:'imported', lang:detectLang(text), chapters });
-      };
-      reader.onerror = reject;
-      reader.readAsText(file, 'UTF-8');
+      }).catch(reject);
     } else if (ext === 'md' || ext === 'markdown') {
-      const reader = new FileReader();
-      reader.onload = () => {
-        let text = reader.result;
-        // Simple markdown to text
+      readTextFileSmart(file).then(raw => {
+        let text = raw;
         text = text.replace(/^#{1,6}\s+/gm, '').replace(/\*\*/g,'').replace(/\*/g,'').replace(/`/g,'').replace(/\[([^\]]+)\]\([^)]+\)/g,'$1');
         const chapters = splitTextIntoChapters(text);
         resolve({ title: name.replace(/\.m?d$/i,''), author:'佚名', cover:'imported', lang:detectLang(text), chapters });
-      };
-      reader.onerror = reject;
-      reader.readAsText(file, 'UTF-8');
+      }).catch(reject);
     } else if (ext === 'pdf') {
       // PDF.js would be needed; for now extract what we can
       const reader = new FileReader();
@@ -2500,14 +2662,11 @@ function parseFile(file) {
     } else if (ext === 'ods') {
       parseOfficeXml(file, 'ods').then(resolve).catch(reject);
     } else if (ext === 'rtf') {
-      const reader = new FileReader();
-      reader.onload = () => {
-        let text = stripRtf(reader.result);
+      readTextFileSmart(file).then(raw => {
+        let text = stripRtf(raw);
         const chapters = splitTextIntoChapters(text);
         resolve({ title: name.replace(/\.rtf$/i,''), author:'佚名', cover:'imported', lang:detectLang(text), chapters });
-      };
-      reader.onerror = reject;
-      reader.readAsText(file, 'UTF-8');
+      }).catch(reject);
     } else if (ext === 'fb2') {
       const reader = new FileReader();
       reader.onload = () => {
@@ -4264,7 +4423,7 @@ function openPasteDialog(seed) {
   };
 }
 
-function importPastedText(txt, seed) {
+async function importPastedText(txt, seed) {
   const firstLine = (txt.split('\n').find(l => l.trim()) || '').trim();
   const title = (seed && seed.title) || (firstLine.length <= 28 ? firstLine : '粘贴导入');
   const body = (seed && seed.title) ? txt : txt.replace(firstLine, '');
@@ -4280,11 +4439,14 @@ function importPastedText(txt, seed) {
     chapters: chapters.length ? chapters : [{ title: '正文', body: body }],
   };
   const imported = JSON.parse(localStorage.getItem('reader_imported_books_v2') || '[]');
-  imported.push(book);
+  let storedInIdb = false;
+  try { await idbPutBook(book); storedInIdb = true; } catch (e) { console.warn('IndexedDB 存入失败', e); }
+  if (storedInIdb) imported.push(bookMetaOnly(book));
+  else imported.push(book);
   try {
     localStorage.setItem('reader_imported_books_v2', JSON.stringify(imported));
   } catch (e) {
-    toast('本机存储空间不够，这本书没有保存下来', 'error');
+    toast('浏览器本地存储写不进去，这本书没有保存下来', 'error');
     return;
   }
   saveState();

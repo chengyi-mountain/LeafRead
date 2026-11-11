@@ -3,8 +3,7 @@
 > 一个**单文件、零依赖、纯离线**的网页阅读器：下载一个 `reader.html`，双击就能读书。
 > 不用装软件、不用起服务器、不上传任何数据 —— 书和笔记都留在你自己的电脑/手机里。
 
-**在线体验**：[chengyi-mountain.github.io/LeafRead](h[https://chengyi-mountain.github.io/LeafRead/reader.html)]
-
+**在线体验**：https://chengyi-mountain.github.io/LeafRead/reader.html
 
 ---
 

@@ -1,4 +1,4 @@
-# 📚 书库阅读器 (BookShelf Reader)
+# 📚 书库阅读器 (LeafRead/BookShelf Reader)
 
 > 一个纯前端、零依赖、全设备自适应的网页阅读器。双击 HTML 文件即可使用，无需服务器、无需安装。
 

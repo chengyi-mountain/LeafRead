@@ -225,6 +225,13 @@ input, textarea, select { font:inherit; color:inherit; }
   font-size:12px; color:var(--text-muted);
   padding:0 4px 8px; min-height:16px;
 }
+.book-del {
+  position:absolute; top:4px; right:4px; z-index:5; width:22px; height:22px; border-radius:50%;
+  display:flex; align-items:center; justify-content:center; cursor:pointer;
+  background:rgba(0,0,0,.42); color:#fff; font-size:15px; line-height:1; border:none;
+  opacity:.85; transition:opacity .15s, transform .15s;
+}
+.book-del:hover { opacity:1; transform:scale(1.08); }
 .shelf-import-row { display:flex; gap:10px; justify-content:center; margin:12px 0 4px; flex-wrap:wrap; }
 .shelf-import-row .discover-btn { flex:0 1 auto; margin-top:0; }
 /* 全站通栏那条 .discover-btn span{display:none} 会把这里的中文压掉，单独覆盖回来 */
@@ -1431,8 +1438,37 @@ function bookCard(book) {
     <div class="book-author">${escapeHtml(book.author || '佚名')}${book.lang === 'zh' ? ' · 中文' : ''}${book.format ? ` <span class="format-badge">${escapeHtml(book.format)}</span>` : ''}${book.isComic ? ' <span class="format-badge">漫画</span>' : ''}</div>
     <div class="book-progress">${escapeHtml(lastRead)}</div>
   </div>`;
+  if (book.imported) {
+    card.style.position = 'relative';
+    const del = document.createElement('button');
+    del.className = 'book-del';
+    del.title = '删除这本书';
+    del.textContent = '×';
+    del.onclick = (ev) => { ev.stopPropagation(); ev.preventDefault(); deleteImportedBook(book); };
+    card.appendChild(del);
+  }
   card.addEventListener('click', () => openBook(book));
   return card;
+}
+
+function deleteImportedBook(book) {
+  if (!confirm('删除《' + book.title + '》？本机保存的正文、阅读进度、笔记都会一起移除。')) return;
+  try {
+    const imported = JSON.parse(localStorage.getItem('reader_imported_books_v2') || '[]')
+      .filter(b => b.id !== book.id);
+    localStorage.setItem('reader_imported_books_v2', JSON.stringify(imported));
+  } catch (e) { console.warn('删除时写 localStorage 失败', e); }
+  idbDeleteBook(book.id);
+  delete state.progress[book.id];
+  delete state.bookmarks[book.id];
+  delete state.highlights[book.id];
+  delete state.notes[book.id];
+  Object.keys(state.progress).forEach(k => { if (k.indexOf(book.id + '_ch_') === 0) delete state.progress[k]; });
+  if (state.currentBook && state.currentBook.id === book.id) { state.currentBook = null; switchView('bookshelf'); }
+  saveState();
+  initBooks();
+  renderBookshelf();
+  toast('已删除《' + book.title + '》', 'success');
 }
 
 // ---- 内置大书按需加载 ----
@@ -2381,6 +2417,7 @@ async function handleFiles(fileList, progressEl, progressText) {
   let okCount = 0;
   const failed = [];
   const tooBig = [];
+  const lowQuality = [];
 
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
@@ -2401,6 +2438,9 @@ async function handleFiles(fileList, progressEl, progressText) {
         console.warn('IndexedDB 存入失败，回退 localStorage', e);
       }
 
+      if (book.textQuality === 'low') {
+        lowQuality.push(file.name);
+      }
       if (storedInIdb) {
         imported.push(bookMetaOnly(book));
         okCount++;
@@ -2435,6 +2475,9 @@ async function handleFiles(fileList, progressEl, progressText) {
   }
   if (tooBig.length) {
     toast('这几个文件太大、浏览器存不下：' + tooBig.join('、') + '。建议先切成小份再导入', 'error', 6000);
+  }
+  if (lowQuality.length) {
+    toast('这几个文件的文字层可能不完整，导入后看着不对就换个源：' + lowQuality.join('、'), '', 6000);
   }
   if (!okCount && !tooBig.length) toast('这些文件都解析失败，请换 TXT / EPUB / DOCX 再试', 'error');
   renderBookshelf();
@@ -2507,6 +2550,72 @@ function decodeTextSmart(buffer) {
 
 function readTextFileSmart(file) {
   return file.arrayBuffer().then(buf => decodeTextSmart(buf));
+}
+
+/* ---------- PDF：按需加载仓库内自托管的 pdf.js ---------- */
+let pdfJsPromise = null;
+function loadPdfJs() {
+  if (window.pdfjsLib) return Promise.resolve(window.pdfjsLib);
+  if (pdfJsPromise) return pdfJsPromise;
+  pdfJsPromise = new Promise((resolve, reject) => {
+    const sc = document.createElement('script');
+    sc.src = 'pdf/pdf.min.js';
+    sc.onload = () => {
+      if (!window.pdfjsLib) { reject(new Error('pdf.js 加载后不可用')); return; }
+      try {
+        window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'pdf/pdf.worker.min.js';
+      } catch (e) { /* 老内核没有 worker 配置也继续试 */ }
+      resolve(window.pdfjsLib);
+    };
+    sc.onerror = () => reject(new Error('仓库里缺少 pdf/pdf.min.js，PDF 解析不可用'));
+    document.head.appendChild(sc);
+  });
+  return pdfJsPromise;
+}
+
+function textLooksGarbled(text) {
+  const sample = String(text || '').slice(0, 3000);
+  if (!sample) return true;
+  let bad = 0, total = 0;
+  for (let i = 0; i < sample.length; i++) {
+    const c = sample.charCodeAt(i);
+    total++;
+    if (c === 0xFFFD || c === 0xFFFE) { bad++; continue; }
+    if (c === 9 || c === 10 || c === 13) continue;
+    if (c >= 0x20 && c < 0x7F) continue;
+    if (c >= 0x4E00 && c <= 0x9FFF) continue;
+    if (c >= 0x3000 && c <= 0x303F) continue;   // 中文标点
+    if (c >= 0xFF00 && c <= 0xFFEF) continue;   // 全角符号
+    if (c >= 0x00A0 && c <= 0x024F) continue;   // 拉丁扩展
+    if (c >= 0x2000 && c <= 0x27FF) continue;   // 通用标点 / 符号
+    bad++;
+  }
+  return total ? bad / total > 0.25 : true;
+}
+
+function extractPdfText(file) {
+  return loadPdfJs().then(lib => file.arrayBuffer().then(buf => {
+    const opts = { data: new Uint8Array(buf), cMapPacked: true, useSystemFonts: true };
+    // 只有仓库里真放了 cmaps 才传，缺了也不会报错
+    opts.cMapUrl = 'pdf/cmaps/';
+    return lib.getDocument(opts).promise;
+  })).then(async pdf => {
+    const total = pdf.numPages;
+    const limit = Math.min(total, 2000);   // 超大 PDF 保护
+    let fullText = '';
+    for (let p = 1; p <= limit; p++) {
+      const page = await pdf.getPage(p);
+      const tc = await page.getTextContent();
+      let pageText = '';
+      tc.items.forEach(it => {
+        pageText += it.str;
+        if (it.hasEOL) pageText += '\n';
+      });
+      fullText += pageText.trim() + '\n\n';
+      if (p % 20 === 0) { /* 让出主线程，避免长 PDF 卡住 UI */ await new Promise(r => setTimeout(r, 0)); }
+    }
+    return { text: fullText, pages: total, truncated: total > limit };
+  });
 }
 
 /* ---------- 大书存储：IndexedDB（localStorage 只有 5MB，装不下整本小说） ---------- */
@@ -2628,27 +2737,23 @@ function parseFile(file) {
         resolve({ title: name.replace(/\.m?d$/i,''), author:'佚名', cover:'imported', lang:detectLang(text), chapters });
       }).catch(reject);
     } else if (ext === 'pdf') {
-      // PDF.js would be needed; for now extract what we can
-      const reader = new FileReader();
-      reader.onload = async () => {
-        try {
-          if (typeof pdfjsLib !== 'undefined') {
-            const pdf = await pdfjsLib.getDocument(new Uint8Array(reader.result)).promise;
-            let fullText = '';
-            for (let p = 1; p <= pdf.numPages; p++) {
-              const page = await pdf.getPage(p);
-              const tc = await page.getTextContent();
-              fullText += tc.items.map(i => i.str).join(' ') + '\n\n';
-            }
-            const chapters = splitTextIntoChapters(fullText);
-            resolve({ title: name.replace(/\.pdf$/i,''), author:'佚名', cover:'imported', lang:detectLang(fullText), chapters });
-          } else {
-            resolve({ title: name.replace(/\.pdf$/i,''), author:'佚名', cover:'imported', lang:'en', chapters:[{title:'', body:'PDF 暂不支持直接在应用内解析（本应用无第三方库），请先转换为 TXT / EPUB 后再导入。'}] });
-          }
-        } catch(e) { reject(e); }
-      };
-      reader.onerror = reject;
-      reader.readAsArrayBuffer(file);
+      extractPdfText(file).then(res => {
+        let text = res.text;
+        if (!text.trim()) {
+          throw new Error('这个 PDF 没有文字层（多半是扫描件），请先用 OCR 转成文字，或换 EPUB / TXT 再导入');
+        }
+        const garbled = textLooksGarbled(text);
+        const chapters = splitTextIntoChapters(text);
+        if (chapters.length > 0 && chapters[0].body) {
+          chapters[0].body = chapters[0].body;
+        }
+        resolve({
+          title: name.replace(/\.pdf$/i,''), author:'佚名', cover:'imported', format:'pdf',
+          lang: detectLang(text), chapters,
+          textQuality: garbled ? 'low' : 'ok',
+          note: res.truncated ? ('PDF 共 ' + res.pages + ' 页，仅导入了前 2000 页') : '',
+        });
+      }).catch(reject);
     } else if (ext === 'pptx' || ext === 'ppt') {
       parseOfficeXml(file, 'pptx').then(resolve).catch(reject);
     } else if (ext === 'docx' || ext === 'doc') {
@@ -2668,9 +2773,7 @@ function parseFile(file) {
         resolve({ title: name.replace(/\.rtf$/i,''), author:'佚名', cover:'imported', lang:detectLang(text), chapters });
       }).catch(reject);
     } else if (ext === 'fb2') {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const xml = reader.result;
+      readTextFileSmart(file).then(xml => {
         const sections = [];
         const bodyMatch = xml.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
         const body = bodyMatch ? bodyMatch[1] : xml;
@@ -2697,9 +2800,7 @@ function parseFile(file) {
           author: authorMatch ? authorMatch.slice(1).join(' ').trim() : '佚名',
           cover:'imported', format:'fb2', lang:detectLang(fullText), chapters: sections
         });
-      };
-      reader.onerror = reject;
-      reader.readAsText(file, 'UTF-8');
+      }).catch(reject);
     } else if (ext === 'mobi' || ext === 'azw3') {
       // MOBI/AZW3 are binary; extract what readable text we can
       const reader = new FileReader();
@@ -2932,12 +3033,19 @@ async function parseOfficeXml(file, type) {
       for (let i = 0; i < sheets.length; i++) {
         const xml = (await zip.readText(sheets[i])) || '';
         const rows = [...xml.matchAll(/<row[^>]*>([\s\S]*?)<\/row>/gi)].map(rm => {
-          const cells = [...rm[1].matchAll(/<c[^>]*?(?:t="([^"]+)")?[^>]*>([\s\S]*?)<\/c>/gi)];
+          const cells = [...rm[1].matchAll(/<c([^>]*)>([\s\S]*?)<\/c>/gi)];
           return cells.map(cm => {
+            const attrs = cm[1] || '';
+            const tM = attrs.match(/t="([^"]+)"/);
+            const t = tM ? tM[1] : '';
+            if (t === 'inlineStr') {
+              const is = (cm[2].match(/<is>([\s\S]*?)<\/is>/) || [])[1];
+              return is ? extractXmlText(is).trim() : '';
+            }
             const v = (cm[2].match(/<v>([\s\S]*?)<\/v>/) || [])[1];
             if (v === undefined) return '';
-            if (cm[1] === 's') return shared[parseInt(v, 10)] || '';
-            return extractXmlText(v);
+            if (t === 's') return shared[parseInt(v, 10)] || '';
+            return extractXmlText(v).trim();
           }).filter(x => x).join(' | ');
         }).filter(r => r.trim());
         if (rows.length) sections.push({ title: '工作表 ' + (i + 1), body: rows.join('\n') });
@@ -3002,18 +3110,47 @@ function extractAllXmlText(entries) {
 function stripRtf(rtf) {
   if (!rtf) return '';
   let text = String(rtf);
-  // Remove hex-encoded chars
-  text = text.replace(/\\'[0-9a-fA-F]{2}/g, '');
-  // Remove RTF control words
-  text = text.replace(/\\[a-zA-Z0-9-]+\s?/g, ' ');
-  // Remove braces
-  text = text.replace(/[{}]/g, '');
-  // Remove escaped chars
+  // 码页（\ansicpg936 之类）决定 \'hh 十六进制转义怎么解码
+  const cpM = text.match(/\\ansicpg(\d+)/);
+  const cp = cpM ? parseInt(cpM[1], 10) : 936;
+  const cpDecode = bytes => {
+    try {
+      if (cp === 950) return new TextDecoder('big5').decode(bytes);
+      if (cp === 1252) return new TextDecoder('windows-1252').decode(bytes);
+      if (cp === 936 || cp === 0) return new TextDecoder('gb18030').decode(bytes);
+      return new TextDecoder('utf-8').decode(bytes);
+    } catch (e) { return ''; }
+  };
+
+  // \uN? → 真正的字符（N 是 16 位有符号数，负数要 +65536）
+  text = text.replace(/\\u(-?\d+)\s?(\?)?/g, (m, n) => {
+    let v = parseInt(n, 10);
+    if (v < 0) v += 65536;
+    return String.fromCharCode(v & 0xFFFF);
+  });
+  // \'hh 十六进制转义：连续一段一起按码页解码
+  text = text.replace(/(?:\\'[0-9a-fA-F]{2})+/g, seq => {
+    const bytes = [];
+    const re = /\\'([0-9a-fA-F]{2})/g;
+    let m;
+    while ((m = re.exec(seq)) !== null) bytes.push(parseInt(m[1], 16));
+    return cpDecode(new Uint8Array(bytes));
+  });
+  // 声明组先整组丢掉，免得字体名混进正文
+  text = text.replace(/\{\\fonttbl[\s\S]*?\}/gi, ' ');
+  text = text.replace(/\{\\colortbl[\s\S]*?\}/gi, ' ');
+  text = text.replace(/\{\\stylesheet[\s\S]*?\}/gi, ' ');
+  text = text.replace(/\{\\info[\s\S]*?\}/gi, ' ');
+  text = text.replace(/\{\\\*[\s\S]*?\}/g, ' ');
+  // 换行类控制字
+  text = text.replace(/\\par\b/g, '\n').replace(/\\line\b/g, '\n').replace(/\\tab\b/g, '\t');
+  // 其余控制字（含 \fs24 \b 这类参数）去掉
+  text = text.replace(/\\[a-zA-Z]+(-?\d+)?\s?/g, ' ');
+  // 转义字符还原
   text = text.replace(/\\([\\{}])/g, '$1');
-  // Decode entities
-  text = text.replace(/\\par\s?/gi, '\n').replace(/\\line\s?/gi, '\n').replace(/\\tab\s?/gi, '\t');
-  text = text.replace(/ \s+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
-  return text;
+  // 去括号、压空白
+  text = text.replace(/[{}]/g, '');
+  return text.replace(/[ \t]{2,}/g, ' ').replace(/\n\s+/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
 // Parse comic archive (CBZ/CBR) — extract image list for viewing

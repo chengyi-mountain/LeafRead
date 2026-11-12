@@ -867,15 +867,16 @@ mark { background:var(--accent); color:#fff; padding:0 2px; border-radius:2px; }
 .pdf-page-wrap canvas { max-width:none; height:auto; display:block; margin:0 auto;
   border-radius:4px; box-shadow:0 4px 18px rgba(0,0,0,.14); background:#fff; }
 /* PDF 缩放条：只在这类「原页」书上出现 */
-#pdfZoomBar { position:fixed; right:12px; bottom:78px; display:none; align-items:center; gap:2px;
-  padding:4px 5px; border-radius:999px; background:var(--paper,#fff); border:1px solid var(--border,#e5e5e5);
-  box-shadow:0 4px 16px rgba(0,0,0,.16); z-index:60; font-size:12px; color:var(--text-sub,#666);
-  padding-bottom:calc(4px + env(safe-area-inset-bottom, 0px)); }
-#pdfZoomBar button { min-width:34px; height:32px; border:0; background:transparent; font-size:16px;
-  color:var(--text,#333); border-radius:999px; line-height:1; }
+#pdfZoomBar { position:fixed; right:10px; bottom:72px; display:none; align-items:center; gap:0;
+  padding:2px 3px; border-radius:999px; background:var(--paper,#fff); border:1px solid var(--border,#e5e5e5);
+  box-shadow:0 2px 8px rgba(0,0,0,.12); z-index:60; font-size:11px; color:var(--text-sub,#666);
+  opacity:.92; padding-bottom:calc(2px + env(safe-area-inset-bottom, 0px)); }
+#pdfZoomBar button { width:22px; min-width:0; height:22px; border:0; background:transparent; font-size:12px;
+  color:var(--text,#333); border-radius:999px; line-height:1; padding:0 !important; box-sizing:border-box;
+  display:inline-flex; align-items:center; justify-content:center; }
 #pdfZoomBar button:active { background:var(--border,#eee); }
-#pdfZoomVal { min-width:44px; text-align:center; font-variant-numeric:tabular-nums; }
-#pdfFitBtn { font-size:12px !important; padding:0 8px; color:var(--text-sub,#666) !important; }
+#pdfZoomVal { min-width:32px; text-align:center; font-variant-numeric:tabular-nums; font-size:11px; }
+#pdfFitBtn { width:auto; min-width:0; font-size:10px !important; padding:0 4px !important; color:var(--text-sub,#666) !important; }
 .pdf-page-status { padding:60px 16px; font-size:14px; color:var(--text-sub); text-align:center; line-height:1.9; }
 .pdf-page-next { margin-top:14px; font-size:12px; color:var(--text-muted); letter-spacing:.08em; }
 .comic-page img { max-width:100%; height:auto; border-radius:8px; box-shadow:0 4px 20px rgba(0,0,0,.12); display:block; margin:0 auto; }

@@ -2240,6 +2240,10 @@ function renderSettings(body) {
         <label>老 PDF 兼容引擎</label>
         <div class="toggle ${s.pdfMupdf?'on':''}" id="togglePdfMupdf"></div>
       </div>
+      <div class="setting-row" id="pdfTrimRow">
+        <label>手机自动裁纸边</label>
+        <div class="toggle ${s.pdfTrim !== false ? 'on' : ''}" id="togglePdfTrim"></div>
+      </div>
       <div class="setting-row" id="pdfFitRow">
         <label>PDF 显示大小</label>
         <div class="seg-control">
@@ -2338,6 +2342,13 @@ function renderSettings(body) {
     if (state.currentBook && state.currentBook.pdfMode === 'pages') renderChapter(state.currentChapter, false);
   };
   body.querySelector('#toggleSound').onclick = function() { s.flipSound = !s.flipSound; saveState(); renderSettings(body); };
+  const trimTg = body.querySelector('#togglePdfTrim');
+  if (trimTg) trimTg.onclick = function() {
+    s.pdfTrim = s.pdfTrim === false;
+    saveState(); renderSettings(body);
+    toast(s.pdfTrim === false ? 'PDF 保留原始纸边（正文会小一点）' : 'PDF 手机端已按正文铺满，纸边裁掉', 'success');
+    if (state.currentBook && state.currentBook.pdfMode === 'pages') renderChapter(state.currentChapter, false);
+  };
   body.querySelector('#setWarm').oninput = e => { s.warmLight = +e.target.value; document.getElementById('valWarm').textContent = Math.round(e.target.value*100)+'%'; applySettings(); };
   const voiceSel = body.querySelector('#setTtsVoice');
   if (voiceSel) voiceSel.onchange = e => {
@@ -3295,23 +3306,130 @@ function pdfFitMode(pageW, pageH) {
   return (pageH * (box.w / pageW)) > box.h + 8 ? 'page' : 'width';
 }
 
+/* 只在手机（窄屏）裁纸边：电脑上现在整页看全的样子是对的，不要动 */
+function pdfTrimEnabled(box) {
+  const st = state.settings || {};
+  if (st.pdfTrim === false) return false;
+  // 真·窄屏才裁：光看容器宽度不够（电脑上网读列宽也可能不到 700）
+  return (window.innerWidth || 1024) < 700 && ((box || pdfPageBox()).w) < 700;
+}
+
+/* 从一张缩略图上找「有字」的范围（相对整页 0~1）。纸色取四角最亮的那个当底色，
+   比底色明显暗的像素才算字，所以扫描件/彩色纸（毛选那种浅黄纸）也能认。 */
+function pdfScanInkBox(imgData) {
+  const w = imgData.width, h = imgData.height, d = imgData.data;
+  const lum = (x, y) => { const i = (y * w + x) * 4; return d[i] + d[i + 1] + d[i + 2]; };
+  const bg = Math.max(lum(1, 1), lum(w - 2, 1), lum(1, h - 2), lum(w - 2, h - 2));
+  const thr = bg - 90;
+  let x0 = w, y0 = h, x1 = -1, y1 = -1;
+  for (let y = 0; y < h; y += 2) {
+    for (let x = 0; x < w; x += 2) {
+      const i = (y * w + x) * 4;
+      if (d[i] + d[i + 1] + d[i + 2] < thr) {
+        if (x < x0) x0 = x; if (x > x1) x1 = x;
+        if (y < y0) y0 = y; if (y > y1) y1 = y;
+      }
+    }
+  }
+  if (x1 < x0 || y1 < y0) return { x0: 0, y0: 0, x1: 1, y1: 1 };
+  const pad = Math.max(4, Math.round(w * 0.012));
+  const fx0 = Math.max(0, (x0 - pad) / w), fy0 = Math.max(0, (y0 - pad) / h);
+  const fx1 = Math.min(1, (x1 + pad) / w), fy1 = Math.min(1, (y1 + pad) / h);
+  const area = (fx1 - fx0) * (fy1 - fy0);
+  // 太窄（认错了）或几乎整页（本来就是满版图）就别裁
+  if (area < 0.18 || area > 0.94) return { x0: 0, y0: 0, x1: 1, y1: 1 };
+  return { x0: fx0, y0: fy0, x1: fx1, y1: fy1 };
+}
+
+/* 渲染一张 300px 宽的缩略图，测出正文块。pdf.js 和 MuPDF 都能给 */ 
+async function pdfThumbInkBox(page, pw, ph, mupdf) {
+  const sc = 300 / pw;
+  if (!mupdf) {
+    const vp = page.getViewport({ scale: sc });
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(vp.width));
+    c.height = Math.max(1, Math.round(vp.height));
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, c.width, c.height);
+    await page.render({ canvasContext: ctx, viewport: vp }).promise;
+    return pdfScanInkBox(ctx.getImageData(0, 0, c.width, c.height));
+  }
+  const lib = window.__mupdfLib;
+  const m = lib.mupdf || lib;
+  const pix = page.toPixmap(m.Matrix.scale(sc, sc), m.ColorSpace.DeviceRGB, false, true);
+  const bmp = await createImageBitmap(new Blob([pix.asPNG()], { type: 'image/png' }));
+  const c = document.createElement('canvas');
+  c.width = bmp.width; c.height = bmp.height;
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(bmp, 0, 0);
+  const b = pdfScanInkBox(ctx.getImageData(0, 0, c.width, c.height));
+  try { bmp.close && bmp.close(); } catch (e) { }
+  try { pix.destroy && pix.destroy(); } catch (e) { }
+  return b;
+}
+
+/* 每页只测一次，放大/重画时直接用缓存 */
+async function pdfTrimFrac(ch, page, pw, ph, mupdf) {
+  const all = { x0: 0, y0: 0, x1: 1, y1: 1 };
+  if (!pdfTrimEnabled()) return all;
+  const key = Math.round(pw) + 'x' + Math.round(ph);
+  if (ch.pdfTrimBox && ch.pdfTrimFor === key) return ch.pdfTrimBox;
+  try {
+    const f = await pdfThumbInkBox(page, pw, ph, mupdf);
+    ch.pdfTrimBox = f; ch.pdfTrimFor = key;
+    return f;
+  } catch (e) {
+    console.warn('裁纸边探测失败，按原页显示', e);
+    return all;
+  }
+}
+
 /* 显示尺寸 = 适配方式 * 手动倍数；画布再按屏幕真实像素渲染（最多 3 倍）+ 像素预算，
-   所以放大之后字是重新画出来的，不是把图拉大 */
-function pdfLayoutFor(pageWidth, pageHeight) {
+   所以放大之后字是重新画出来的，不是把图拉大。
+   frac 是正文块占整页的比例：按正文块来适配宽度，纸边就不会占掉手机的屏幕宽度。 */
+function pdfLayoutFor(pageWidth, pageHeight, frac) {
   const box = pdfPageBox();
   const st = state.settings || {};
   const dpr = Math.min(3, window.devicePixelRatio || 1);
-  const fitW = box.w / pageWidth;
-  const fitH = box.h / pageHeight;
+  const f = (frac && pdfTrimEnabled(box)) ? frac : { x0: 0, y0: 0, x1: 1, y1: 1 };
+  const wf = Math.max(0.05, f.x1 - f.x0), hf = Math.max(0.05, f.y1 - f.y0);
+  const tw = pageWidth * wf, th = pageHeight * hf;
+  const fitW = box.w / tw;
+  const fitH = box.h / th;
   const mode = pdfFitMode(pageWidth, pageHeight);
   const mult = mode === 'page' ? 1 : Math.max(0.4, Math.min(4, Number(st.pdfZoom) || 1));
   let cssScale = mode === 'page' ? Math.min(fitW, fitH) : fitW;
   cssScale *= mult;
   let scale = cssScale * dpr;
   const budget = 6000000;
-  const px = (pageWidth * scale) * (pageHeight * scale);
-  if (px > budget) scale *= Math.sqrt(budget / px);
-  return { scale: scale, cssW: Math.max(120, Math.round(pageWidth * cssScale)), dpr: dpr, cssScale: cssScale };
+  const pxAll = (pageWidth * scale) * (pageHeight * scale);
+  if (pxAll > budget) scale *= Math.sqrt(budget / pxAll);
+  return {
+    scale: scale, dpr: dpr, cssScale: cssScale, frac: f,
+    cssW: Math.max(120, Math.round(tw * cssScale)),
+    cssH: Math.max(80, Math.round(th * cssScale)),
+    fullW: Math.max(120, Math.round(pageWidth * cssScale)),
+    fullH: Math.max(80, Math.round(pageHeight * cssScale)),
+    offX: Math.round(f.x0 * pageWidth * cssScale),
+    offY: Math.round(f.y0 * pageHeight * cssScale)
+  };
+}
+
+/* 把整页画布按正文块剪出来显示：外层定尺寸 + overflow hidden，里面把页挪出去 */
+function pdfClipMount(node, lay) {
+  node.style.width = lay.fullW + 'px';
+  node.style.height = lay.fullH + 'px';
+  node.style.display = 'block';
+  node.style.marginLeft = (-lay.offX) + 'px';
+  node.style.marginTop = (-lay.offY) + 'px';
+  const holder = document.createElement('div');
+  holder.className = 'pdf-page-clip';
+  holder.style.width = lay.cssW + 'px';
+  holder.style.height = lay.cssH + 'px';
+  holder.style.overflow = 'hidden';
+  holder.appendChild(node);
+  return holder;
 }
 
 let pdfResizeTimer = null;
@@ -3382,7 +3500,7 @@ function updatePdfZoomBar() {
   const chNow = state.currentBook.chapters[state.currentChapter];
   const pw = (chNow && chNow.pdfW) || 595, ph = (chNow && chNow.pdfH) || 842;
   const boxNow = pdfPageBox();
-  const layNow = pdfLayoutFor(pw, ph);
+  const layNow = pdfLayoutFor(pw, ph, chNow && chNow.pdfTrimBox);
   const isPage = pdfFitMode(pw, ph) === 'page';
   // 数字显示「这一页实际占了容器宽度的多少」，整页时自然是百元以下，不会和按钮重名
   document.getElementById('pdfZoomVal').textContent = Math.round(layNow.cssW / boxNow.w * 100) + '%';
@@ -3436,25 +3554,27 @@ function renderPdfPage(chIdx, ch) {
     if (state.currentChapter !== chIdx) return 'stale';
     const page = await doc.getPage(pageNo);
     const base = page.getViewport({ scale: 1 });
-    const lay = pdfLayoutFor(base.width, base.height);
+    const frac = await pdfTrimFrac(ch, page, base.width, base.height, false);
+    if (state.currentChapter !== chIdx) return 'stale';
+    const lay = pdfLayoutFor(base.width, base.height, frac);
     const vp = page.getViewport({ scale: lay.scale });
     const canvas = document.createElement('canvas');
     canvas.width = Math.round(vp.width);
     canvas.height = Math.round(vp.height);
-    canvas.style.width = lay.cssW + 'px';
-    canvas.style.height = 'auto';
     canvas.style.background = '#fff';
     await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
-    if (!mount(canvas, nextTip())) return 'stale';
+    if (!mount(pdfClipMount(canvas, lay), nextTip())) return 'stale';
     return 'ok';
   });
 
-  const paintMupdf = () => getMupdfDoc(book).then(doc => {
+  const paintMupdf = () => getMupdfDoc(book).then(async doc => {
     if (state.currentChapter !== chIdx) return 'stale';
     const page = doc.loadPage(pageNo - 1);
     const b = page.getBounds();
     const pw = b[2] - b[0], ph = b[3] - b[1];
-    const lay = pdfLayoutFor(pw, ph);
+    const frac = await pdfTrimFrac(ch, page, pw, ph, true);
+    if (state.currentChapter !== chIdx) return 'stale';
+    const lay = pdfLayoutFor(pw, ph, frac);
     const zoom = lay.scale;
     const lib = window.__mupdfLib;
     const matrix = lib.mupdf ? lib.mupdf.Matrix.scale(zoom, zoom) : lib.Matrix.scale(zoom, zoom);
@@ -3467,9 +3587,7 @@ function renderPdfPage(chIdx, ch) {
     const img = document.createElement('img');
     img.src = pdfPageObjectUrl;
     img.alt = '第 ' + pageNo + ' 页';
-    img.style.width = lay.cssW + 'px';
-    img.style.height = 'auto';
-    if (!mount(img, nextTip())) return 'stale';
+    if (!mount(pdfClipMount(img, lay), nextTip())) return 'stale';
     return 'ok';
   });
 

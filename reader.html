@@ -729,11 +729,18 @@ mark { background:var(--accent); color:#fff; padding:0 2px; border-radius:2px; }
   background:var(--bg-elev); border-top:1px solid var(--border);
   padding:10px 16px; padding-bottom: max(10px, var(--safe-bottom));
   box-shadow:0 -4px 20px rgba(0,0,0,.08);
-  display:flex; align-items:center; gap:12px;
+  display:flex; align-items:center; gap:8px;
   transform:translateY(120%); transition:transform .35s var(--transition);
 }
 .tts-bar.show { transform:translateY(0); }
 .tts-info { flex:1; min-width:0; }
+.tts-rate {
+  flex:0 0 auto; min-width:46px; height:34px; padding:0 8px;
+  border-radius:8px; border:1px solid var(--border); background:var(--bg);
+  color:var(--text); font-size:12px; font-variant-numeric:tabular-nums;
+  cursor:pointer;
+}
+.tts-rate:active { transform:scale(.96); }
 .tts-info .tts-book { font-size:12px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .tts-info .tts-chapter { font-size:11px; color:var(--text-sub); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .tts-text {
@@ -1292,6 +1299,7 @@ mark { background:var(--accent); color:#fff; padding:0 2px; border-radius:2px; }
     <div class="tts-book" id="ttsBook"></div>
     <div class="tts-chapter" id="ttsChapter"></div>
   </div>
+  <button class="tts-rate" id="ttsRateBtn" title="语速">1.0×</button>
   <button class="tts-btn" id="ttsClose" title="关闭">
     <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
   </button>
@@ -1403,6 +1411,7 @@ const state = {
     shelfView: 'grid',
     ttsVoice: '',
     ttsRate: 0.95,
+    ttsSleep: 0,
     ttsPitch: 1,
   },
   progress: {},
@@ -1410,7 +1419,7 @@ const state = {
   highlights: {},
   notes: {},
   stats: { totalTime: 0, streak: 0, lastRead: null, readDates: {}, dailyMinutes: {} },
-  tts: { active:false, utter:null, currentIndex:0, sentences:[], paused:false },
+  tts: { active:false, utter:null, currentIndex:0, sentences:[], paused:false, sleepAt:0, hlEl:null, paraIdx:0 },
   ui: { topbarTimer:null, sidebarMode:'toc' },
   shelfQuery: '',
   shelfCategory: '全部',
@@ -2423,6 +2432,16 @@ function renderSettings(body) {
           <button class="reset-btn" id="ttsTry" style="flex:0 0 auto;padding:6px 14px;margin:0">朗读一句听听</button>
         </div>
       </div>
+      <div class="setting-row">
+        <label>定时关闭</label>
+        <select class="tts-select" id="setTtsSleep">
+          <option value="0"${(+s.ttsSleep||0)===0?' selected':''}>不开启</option>
+          <option value="15"${(+s.ttsSleep||0)===15?' selected':''}>15 分钟</option>
+          <option value="30"${(+s.ttsSleep||0)===30?' selected':''}>30 分钟</option>
+          <option value="60"${(+s.ttsSleep||0)===60?' selected':''}>60 分钟</option>
+        </select>
+      </div>
+      <div class="tts-note">息屏 / 切到后台也能接着读：朗读时会占住系统的音频通道（安卓 Chrome、电脑浏览器可用；iPhone 的 Safari 息屏会暂停网页语音，这是系统限制）。锁屏和通知栏能控制播放、上一句、下一句。</div>
       <div class="tts-note">${voiceCount ? '本机可用音色 ' + voiceCount + ' 个，来自你的浏览器/系统。安卓与 iPhone 各有不同的中文音色，换个设备声音会不一样。' : '音色列表还没加载出来，点一下「朗读一句听听」试试；如果仍失败，说明这台设备没装中文语音包。'}</div>
     </div>
     <div class="settings-group">
@@ -2509,6 +2528,13 @@ function renderSettings(body) {
     saveState();
   };
   body.querySelector('#ttsTry').onclick = () => ttsTrySample();
+  const sleepSel = body.querySelector('#setTtsSleep');
+  if (sleepSel) sleepSel.onchange = e => {
+    s.ttsSleep = +e.target.value;
+    saveState();
+    if (state.tts.active) ttsArmSleepTimer();
+    toast(+e.target.value ? '本次朗读会在 ' + e.target.value + ' 分钟后自动停' : '定时关闭已关掉', 'success');
+  };
   body.querySelectorAll('.mode-tab[data-shelf]').forEach(el => el.onclick = () => { s.shelfView = el.dataset.shelf; saveState(); renderSettings(body); renderBookshelf(); });
   
   // Show/hide paged-only settings
@@ -5108,6 +5134,110 @@ function ttsCancel(then) {
   };
   setTimeout(ready, 70);
 }
+/* ===== 息屏 / 后台继续朗读 =====
+   网页语音（Web Speech）由系统播放，手机息屏时页面会被挂起，声音就断。
+   这里用一条全零的静音 WAV 占住音频通道，让浏览器保持「正在播放媒体」的状态，
+   并用 MediaSession 把书名/章节送到锁屏和通知栏，附带播放、上一句、下一句控制。
+   说明：iPhone 的 Safari 息屏会暂停网页语音，属系统限制，安卓 Chrome 与电脑浏览器可用。 */
+function ttsSilentWavUrl() {
+  try {
+    if (ttsSilentUrl) return ttsSilentUrl;
+    const rate = 8000, secs = 0.6, bytes = Math.floor(rate * secs) * 2;
+    const buf = new ArrayBuffer(44 + bytes);
+    const dv = new DataView(buf);
+    const w = (off, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(off + i, s.charCodeAt(i)); };
+    w(0, 'RIFF'); dv.setUint32(4, 36 + bytes, true); w(8, 'WAVE');
+    w(12, 'fmt '); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+    dv.setUint32(24, rate, true); dv.setUint32(28, rate * 2, true); dv.setUint16(32, 2, true); dv.setUint16(34, 16, true);
+    w(36, 'data'); dv.setUint32(40, bytes, true);
+    ttsSilentUrl = URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+    return ttsSilentUrl;
+  } catch (e) { return ''; }
+}
+let ttsSilentUrl = '';
+let ttsKeepAudio = null;
+function ttsKeepAliveStart() {
+  try {
+    if (!ttsKeepAudio) {
+      const a = document.createElement('audio');
+      a.id = 'ttsKeepAlive';
+      a.loop = true; a.preload = 'auto'; a.volume = 1;
+      a.setAttribute('playsinline', '');
+      a.style.display = 'none';
+      a.src = ttsSilentWavUrl();
+      document.body.appendChild(a);
+      ttsKeepAudio = a;
+    }
+    const p = ttsKeepAudio.play();
+    if (p && p.catch) p.catch(() => { });
+  } catch (e) { }
+  ttsSyncMediaSession();
+}
+function ttsKeepAliveStop() {
+  try { if (ttsKeepAudio) ttsKeepAudio.pause(); } catch (e) { }
+  if ('mediaSession' in navigator) { try { navigator.mediaSession.playbackState = 'none'; } catch (e) { } }
+}
+function ttsSyncMediaSession() {
+  if (!('mediaSession' in navigator)) return;
+  try {
+    const book = state.currentBook;
+    const ch = book && book.chapters && book.chapters[state.currentChapter];
+    if (typeof MediaMetadata !== 'undefined') {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: (ch && ch.title) || (book ? book.title : 'LeafRead'),
+        artist: book ? book.title : 'LeafRead',
+        album: 'LeafRead 朗读'
+      });
+    }
+    navigator.mediaSession.playbackState = state.tts.active ? (state.tts.paused ? 'paused' : 'playing') : 'none';
+    const set = (act, fn) => { try { navigator.mediaSession.setActionHandler(act, fn); } catch (e) { } };
+    set('play', () => { if (state.tts.active) resumeTTS(); else startTTS(); });
+    set('pause', () => pauseTTS());
+    set('stop', () => stopTTS());
+    set('previoustrack', () => prevTTSSentence());
+    set('nexttrack', () => nextTTSSentence());
+    set('seekbackward', () => prevTTSSentence());
+    set('seekforward', () => nextTTSSentence());
+  } catch (e) { }
+}
+/* 回到前台时把被系统掐断的朗读接上（从当前这句继续，不回到开头） */
+function ttsResumeIfStalled() {
+  if (!state.tts.active || state.tts.paused) return;
+  let busy = false;
+  try { busy = !!(speechSynthesis.speaking || speechSynthesis.pending); } catch (e) { }
+  if (busy) return;
+  const since = Date.now() - (state.tts.lastSpeakAt || 0);
+  if (since > 2200) ttsCancel(() => { if (state.tts.active && !state.tts.paused) ttsPlayCurrent(); });
+  ttsKeepAliveStart();
+}
+function ttsArmSleepTimer() {
+  const min = +(state.settings.ttsSleep || 0);
+  state.tts.sleepAt = min > 0 ? Date.now() + min * 60000 : 0;
+}
+const TTS_RATE_STEPS = [0.85, 1, 1.15, 1.35, 1.6];
+function ttsSyncRateBtn() {
+  const b = document.getElementById('ttsRateBtn');
+  if (!b) return;
+  const r = Math.max(0.5, Math.min(2, +(state.settings.ttsRate || 0.95)));
+  b.textContent = r.toFixed(2).replace(/0$/, '') + '×';
+}
+function ttsCycleRate() {
+  const cur = +(state.settings.ttsRate || 0.95);
+  let i = TTS_RATE_STEPS.findIndex(v => Math.abs(v - cur) < 0.02);
+  if (i < 0) {
+    // 当前值不在档位里（比如 0.95）：先落到最近的一档，再往后走
+    i = 0;
+    TTS_RATE_STEPS.forEach((v, k) => { if (Math.abs(v - cur) < Math.abs(TTS_RATE_STEPS[i] - cur)) i = k; });
+    if (Math.abs(TTS_RATE_STEPS[i] - cur) < 0.03) i = (i + 1) % TTS_RATE_STEPS.length;
+  } else {
+    i = (i + 1) % TTS_RATE_STEPS.length;
+  }
+  state.settings.ttsRate = TTS_RATE_STEPS[i];
+  saveState();
+  ttsSyncRateBtn();
+  toast('语速 ' + state.settings.ttsRate.toFixed(2) + '×', 'success');
+  if (state.tts.active) { clearTimeout(state.tts.timer); state.tts.gen = (state.tts.gen || 0) + 1; ttsCancel(() => { if (state.tts.active && !state.tts.paused) ttsPlayCurrent(); }); }
+}
 function toggleTTS() {
   if (state.tts.active) { stopTTS(); return; }
   startTTS();
@@ -5135,6 +5265,9 @@ function startTTS() {
   document.getElementById('ttsBar').classList.add('show');
   document.getElementById('ttsBook').textContent = book.title;
   document.getElementById('ttsChapter').textContent = ch.title || '';
+  ttsSyncRateBtn();
+  ttsArmSleepTimer();
+  ttsKeepAliveStart();
   ttsEnsureWatchdog();
   ttsCancel(() => ttsPlayCurrent());
 }
@@ -5193,6 +5326,12 @@ function ttsNextChapter() {
 function ttsEnsureWatchdog() {
   if (state.tts.watch) clearInterval(state.tts.watch);
   state.tts.watch = setInterval(() => {
+    if (state.tts.sleepAt && Date.now() >= state.tts.sleepAt) {
+      state.tts.sleepAt = 0;
+      toast('定时朗读时间到，已停止', 'success');
+      stopTTS();
+      return;
+    }
     if (!state.tts.active || state.tts.paused) return;
     if (speechSynthesis.speaking) return;
     const since = Date.now() - (state.tts.speakAt || state.tts.lastSpeakAt || 0);
@@ -5216,15 +5355,20 @@ function stopTTS() {
   if (bar) { bar.classList.remove('show'); bar.textContent = ''; }
   document.querySelectorAll('.tts-current').forEach(el => el.classList.remove('tts-current'));
   state.tts.hlEl = null;
+  state.tts.sleepAt = 0;
+  ttsKeepAliveStop();
 }
 function pauseTTS() {
   state.tts.paused = true;
   clearTimeout(state.tts.timer);
   speechSynthesis.pause();
+  if ('mediaSession' in navigator) { try { navigator.mediaSession.playbackState = 'paused'; } catch (e) { } }
 }
 function resumeTTS() {
   state.tts.paused = false;
   speechSynthesis.resume();
+  if ('mediaSession' in navigator) { try { navigator.mediaSession.playbackState = 'playing'; } catch (e) { } }
+  ttsKeepAliveStart();
   if (!speechSynthesis.speaking) ttsCancel(() => ttsPlayCurrent());
 }
 // 段落 -> 句子索引：按累积字数对齐（句子表就是同一段文字的切分，字数对得上）
@@ -5651,6 +5795,9 @@ function bindEvents() {
   document.getElementById('ttsPrev').onclick = prevTTSSentence;
   document.getElementById('ttsNext').onclick = nextTTSSentence;
   document.getElementById('ttsClose').onclick = stopTTS;
+  const rateBtn = document.getElementById('ttsRateBtn');
+  if (rateBtn) rateBtn.onclick = () => ttsCycleRate();
+  ttsSyncRateBtn();
   
   // Sidebar close
   document.getElementById('sidebarClose').onclick = closeSidebar;
@@ -5895,10 +6042,16 @@ function bindEvents() {
     });
   }
   
-  // Visibility change - save and timer
+  // Visibility change - save state; 朗读不打断（息屏 / 切后台继续读）
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) { saveState(); stopReadingTimer(); stopTTS(); }
-    else { startReadingTimer(); }
+    if (document.hidden) {
+      saveState();
+      stopReadingTimer();
+    } else {
+      startReadingTimer();
+      saveState();
+      if (state.tts.active) ttsResumeIfStalled();
+    }
   });
   
   // Resize

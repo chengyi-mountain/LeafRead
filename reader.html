@@ -359,6 +359,58 @@ input, textarea, select { font:inherit; color:inherit; }
 }
 [data-theme="eink"] .book-cover.img-cover img { filter:grayscale(1) contrast(1.06); }
 
+/* ===== 首次使用引导 ===== */
+.guide-mask {
+  position: fixed; inset: 0; z-index: 2600; display: none;
+  align-items: center; justify-content: center; padding: 22px;
+  background: rgba(18,20,16,0.5); backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+}
+.guide-mask.show { display: flex; animation: lrfade .28s ease; }
+.guide-card {
+  width: min(430px, 100%); max-height: calc(var(--vh) * 92); overflow-y: auto;
+  background: var(--bg-elev); color: var(--text);
+  border: 1px solid var(--border); border-radius: 18px;
+  padding: 22px 22px 16px; box-shadow: var(--shadow-lg);
+  animation: guideIn .32s cubic-bezier(.2,.8,.2,1);
+}
+@keyframes guideIn { from { opacity: 0; transform: translateY(14px) scale(.98); } to { opacity: 1; transform: none; } }
+.guide-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.guide-stepno { font-size: 11.5px; letter-spacing: .1em; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.guide-skip-top {
+  border: 0; background: transparent; color: var(--text-muted);
+  font-size: 12.5px; padding: 4px 2px; cursor: pointer; font-family: inherit;
+}
+.guide-ic {
+  width: 52px; height: 52px; margin: 16px 0 14px; border-radius: 14px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg); border: 1px solid var(--border); color: var(--accent);
+}
+.guide-ic svg { width: 26px; height: 26px; }
+.guide-title { font-size: 18.5px; font-weight: 700; letter-spacing: .01em; line-height: 1.35; }
+.guide-text { margin-top: 9px; font-size: 14px; line-height: 1.78; color: var(--text-sub); }
+.guide-text b { color: var(--text); font-weight: 600; }
+.guide-keys { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 7px; }
+.guide-key {
+  font-size: 11.5px; padding: 4px 9px; border-radius: 999px;
+  background: var(--bg); border: 1px solid var(--border); color: var(--text-sub);
+}
+.guide-dots { display: flex; gap: 6px; margin: 20px 0 14px; }
+.guide-dots i { width: 100%; height: 3px; border-radius: 2px; background: var(--border-strong); transition: background .2s; }
+.guide-dots i.on { background: var(--accent); }
+.guide-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.guide-skip {
+  border: 0; background: transparent; color: var(--text-muted);
+  font-size: 13px; padding: 10px 2px; cursor: pointer; font-family: inherit;
+}
+.guide-next {
+  border: 0; cursor: pointer; font-family: inherit;
+  background: var(--accent); color: #fff; font-size: 14px; font-weight: 600;
+  padding: 11px 26px; border-radius: 999px; letter-spacing: .02em;
+  box-shadow: 0 4px 14px rgba(0,0,0,.14); transition: transform .16s ease, opacity .16s;
+}
+.guide-next:active { transform: scale(.96); }
+[data-theme="dark"] .guide-next { color: #1a1a1a; }
 .book-grid {
   display:grid;
   grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
@@ -1220,6 +1272,24 @@ mark { background:var(--accent); color:#fff; padding:0 2px; border-radius:2px; }
   </div>
 </div>
 
+<!-- 首次使用引导 -->
+<div class="guide-mask" id="guideMask">
+  <div class="guide-card" role="dialog" aria-modal="true" aria-labelledby="guideTitle">
+    <div class="guide-head">
+      <div class="guide-stepno" id="guideStepNo">1 / 5</div>
+      <button class="guide-skip-top" id="guideSkipTop">跳过引导</button>
+    </div>
+    <div class="guide-ic" id="guideIcon"></div>
+    <div class="guide-title" id="guideTitle"></div>
+    <div class="guide-text" id="guideText"></div>
+    <div class="guide-keys" id="guideKeys"></div>
+    <div class="guide-dots" id="guideDots"></div>
+    <div class="guide-actions">
+      <button class="guide-skip" id="guideSkip">不再提示</button>
+      <button class="guide-next" id="guideNext">下一步</button>
+    </div>
+  </div>
+</div>
 <!-- Toast container -->
 <div class="toast-wrap" id="toastWrap"></div>
 
@@ -2062,6 +2132,7 @@ function renderSettings(body) {
   const voiceCount = ttsAllVoices().length;
   body.innerHTML = `
     <div class="settings-group">
+      <button class="reset-btn" id="openGuide">使用引导</button>
       <button class="reset-btn" id="resetSettings">恢复默认设置</button>
     </div>
     <div class="settings-group">
@@ -2240,6 +2311,9 @@ function renderSettings(body) {
   // Show/hide paged-only settings
   const pagedOnly = [document.getElementById('animRow'), document.getElementById('shadowRow'), document.getElementById('soundRow')];
   pagedOnly.forEach(el => el.style.display = s.mode === 'paged' ? '' : 'none');
+
+  const guideBtn = body.querySelector('#openGuide');
+  if (guideBtn) guideBtn.onclick = () => showGuide(0);
 
   // 恢复默认设置
   body.querySelector('#resetSettings').onclick = () => {
@@ -5044,6 +5118,88 @@ function bindEvents() {
 }
 
 // ===== Init =====
+/* ===== 首次使用引导（一步一指引） ===== */
+const GUIDE_STEPS = [
+  {
+    icon: '<path d="M4 6.2A2.7 2.7 0 0 1 6.7 3.5H20v17H6.7A2.7 2.7 0 0 1 4 17.8V6.2z"/><path d="M4 6.2A2.7 2.7 0 0 1 6.7 8.9H20"/>',
+    title: '欢迎用 LeafRead 读书',
+    text: '一个不用装软件、不上传任何数据的阅读器：书和笔记都留在你自己手机上。<br>下面 5 步带你走一遍，<b>大约 40 秒</b>，随时可以跳过。',
+    keys: ['离线可用', '本地存储', '手机 / 平板 / 电脑'],
+  },
+  {
+    icon: '<path d="M12 3v12"/><path d="M7.5 10.5L12 15l4.5-4.5"/><path d="M4 18.5h16"/>',
+    title: '书架：点封面就开书',
+    text: '首页就是你的书架。<b>轻触封面</b>开始读，进度会自动记住。<br>顶部「导入本地文件」可以一次多选 TXT、EPUB、PDF、Word、图片等；「粘贴正文」能把一段文字直接变成一本书。',
+    keys: ['导入本地文件', '粘贴正文', '搜索书名 / 作者'],
+  },
+  {
+    icon: '<circle cx="12" cy="12" r="4.2"/><path d="M3.5 12h3.3M17.2 12h3.3M12 3.5v3.3M12 17.2v3.3"/>',
+    title: '阅读手势：左一下、右一下',
+    text: '阅读时<b>点屏幕左侧</b>翻上一页、<b>点右侧</b>翻下一页，<b>点中间</b>唤出顶栏（返回、目录、书签、搜索、设置）。<br>不习惯翻页就在设置里切成「滚动」，上下滑着读。',
+    keys: ['左右点翻页', '中键唤顶栏', '滚动 / 翻页可切'],
+  },
+  {
+    icon: '<circle cx="12" cy="12" r="9"/><circle cx="9.2" cy="9.6" r="1.5"/><circle cx="14.6" cy="9.2" r="1.5"/><circle cx="9.4" cy="14.4" r="1.5"/><path d="M12 21c-1.9 0-2.6-1.3-2.2-2.7.4-1.5 1.3-2.4 2.7-2.4h3.6c1.2 0 2.4.8 2.4 2 0 1.6-2.5 3.1-6.5 3.1z"/>',
+    title: '主题、字号和朗读',
+    text: '设置里有六套主题（含<b>水墨屏</b>），字号、行距、页宽都能调。<br>朗读可选音色、语速、音调，先点「朗读一句听听」对比；读的时候当前段落会高亮并自动跟到屏幕中间。',
+    keys: ['六套主题', '选音色试听', '朗读跟读高亮'],
+  },
+  {
+    icon: '<path d="M6 3.2h8l4 4v13.6H6z"/><path d="M14 3.2v4h4"/><path d="M8.6 12.4h6.8M8.6 15.6h6.8"/>',
+    title: 'PDF 和内置书都能原样读',
+    text: '书架最上方是<b>《毛泽东选集》四卷</b>的原页影印，第一次点开会下载那一卷（1.4–1.9 MB），之后直接打开。<br>自己导入的 PDF 也走原页显示，版面、页眉页码都在，中文不乱码；扫描件同样能看。',
+    keys: ['原页阅读', '中文不乱码', '扫描件可读'],
+  },
+];
+let guideIndex = 0;
+const GUIDE_SEEN_KEY = 'reader_guide_seen_v1';
+
+function guideSetStep(i) {
+  guideIndex = Math.max(0, Math.min(GUIDE_STEPS.length - 1, i));
+  const st = GUIDE_STEPS[guideIndex];
+  document.getElementById('guideStepNo').textContent = (guideIndex + 1) + ' / ' + GUIDE_STEPS.length;
+  document.getElementById('guideIcon').innerHTML =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">' + st.icon + '</svg>';
+  document.getElementById('guideTitle').textContent = st.title;
+  document.getElementById('guideText').innerHTML = st.text;
+  document.getElementById('guideKeys').innerHTML = st.keys.map(k => '<span class="guide-key">' + escapeHtml(k) + '</span>').join('');
+  document.getElementById('guideDots').innerHTML =
+    GUIDE_STEPS.map((_, k) => '<i class="' + (k <= guideIndex ? 'on' : '') + '"></i>').join('');
+  document.getElementById('guideNext').textContent = guideIndex === GUIDE_STEPS.length - 1 ? '开始阅读' : '下一步';
+  document.getElementById('guideSkip').textContent = guideIndex === GUIDE_STEPS.length - 1 ? '直接进入' : '不再提示';
+}
+
+function showGuide(i) {
+  guideSetStep(i || 0);
+  const mask = document.getElementById('guideMask');
+  if (mask) mask.classList.add('show');
+}
+
+function closeGuide(markSeen) {
+  const mask = document.getElementById('guideMask');
+  if (mask) mask.classList.remove('show');
+  if (markSeen !== false) { try { localStorage.setItem(GUIDE_SEEN_KEY, '1'); } catch (e) {} }
+}
+
+function bindGuide() {
+  const mask = document.getElementById('guideMask');
+  if (!mask) return;
+  mask.addEventListener('click', ev => { if (ev.target === mask) closeGuide(); });
+  document.getElementById('guideSkip').onclick = () => closeGuide();
+  document.getElementById('guideSkipTop').onclick = () => closeGuide();
+  document.getElementById('guideNext').onclick = () => {
+    if (guideIndex >= GUIDE_STEPS.length - 1) { closeGuide(); return; }
+    guideSetStep(guideIndex + 1);
+  };
+  document.addEventListener('keydown', ev => {
+    if (!mask.classList.contains('show')) return;
+    if (ev.key === 'Escape') closeGuide();
+    else if (ev.key === 'Enter' || ev.key === 'ArrowRight') document.getElementById('guideNext').click();
+    else if (ev.key === 'ArrowLeft') guideSetStep(guideIndex - 1);
+  });
+}
+window.showGuide = showGuide;
+
 function init() {
   loadState();
   if (typeof state.shelfQuery !== 'string') state.shelfQuery = '';
@@ -5055,6 +5211,10 @@ function init() {
   bindDiscover();
   renderBookshelf();
   updateBookmarkBadge();
+  try { bindGuide(); } catch (e) { console.warn('guide bind', e); }
+  try {
+    if (!localStorage.getItem(GUIDE_SEEN_KEY)) setTimeout(() => showGuide(0), 320);
+  } catch (e) {}
   updateNotesBadge();
   
   // Add import button to topbar (hidden initially, shown in reader)

@@ -1292,7 +1292,6 @@ mark { background:var(--accent); color:#fff; padding:0 2px; border-radius:2px; }
     <div class="tts-book" id="ttsBook"></div>
     <div class="tts-chapter" id="ttsChapter"></div>
   </div>
-  <div class="tts-text" id="ttsText"></div>
   <button class="tts-btn" id="ttsClose" title="关闭">
     <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
   </button>
@@ -2062,6 +2061,7 @@ function renderChapter(chIdx, restorePos) {
   
   // Mode
   setReaderMode();
+  if (state.settings.mode === 'paged') renderPage(0, false);
   
   // Restore position
   if (restorePos) {
@@ -4717,9 +4717,10 @@ function buildChapterHTML(chIdx) {
   const ch = state.currentBook.chapters[chIdx];
   if (!ch) return '';
   const bodyText = chapterBodyText(ch);
-  const paragraphs = bodyText.split(/\n\s*\n/).filter(p => p.trim().length > 0);
-  const list = paragraphs.length ? paragraphs : [bodyText];
-  const body = list.map(p => `<p>${escapeHtml(p.trim())}</p>`).join('');
+  let paragraphs = bodyText.split(/\n\s*\n/).filter(p => p.trim().length > 0);
+  if (paragraphs.length <= 1) paragraphs = bodyText.split(/\n+/).filter(p => p.trim().length > 0);
+  if (!paragraphs.length) paragraphs = [bodyText];
+  const body = paragraphs.map(p => `<p>${escapeHtml(p.trim())}</p>`).join('');
   return (ch.title ? `<h2>${escapeHtml(ch.title)}</h2>` : '') + body;
 }
 
@@ -5029,15 +5030,25 @@ function ttsSplitText(text) {
   return out.filter(s => s && s.length);
 }
 function ttsWriteSpeed(sentence) {
-  const bar = document.getElementById('ttsText');
-  if (!bar) return;
-  bar.textContent = sentence;
-  bar.classList.add('show');
+  // 播放器不再显示逐句字幕，只靠正文高亮
+  return;
+}
+function ttsParagraphs() {
+  if (state.settings.mode === 'paged') return [...document.querySelectorAll('#pageCanvas p')];
+  return [...document.querySelectorAll('#readerInner .chapter-body p')];
+}
+function ttsSyncPagedView() {
+  if (state.settings.mode !== 'paged') return;
+  const cur = document.querySelector('#pageCanvas .tts-current');
+  if (!cur) return;
+  const stride = pageLayoutMetrics().stride || 1;
+  const page = Math.max(0, Math.floor((cur.offsetLeft + 4) / stride));
+  if (page !== (state.pageIndex || 0)) renderPage(page, true);
 }
 function ttsHighlight(sentence, paraEl) {
   ttsWriteSpeed(sentence);
-  document.querySelectorAll('.tts-current').forEach(el => el.classList.remove('tts-current'));
-  const paras = [...document.querySelectorAll('#readerInner .chapter-body p')];
+  const paras = ttsParagraphs();
+  if (!paras.length) return;
   let hit = paraEl || null;
   const flat = String(sentence || '').replace(/\s+/g, '');
   if (!hit && flat) {
@@ -5054,11 +5065,18 @@ function ttsHighlight(sentence, paraEl) {
       if (tryHit(p)) hit = p;
     }
   }
-  if (hit) {
+  if (!hit) return;
+  const changed = hit !== state.tts.hlEl;
+  if (changed) {
+    document.querySelectorAll('.tts-current').forEach(el => el.classList.remove('tts-current'));
     hit.classList.add('tts-current');
-    const at = paras.indexOf(hit);
-    if (at >= 0) state.tts.paraIdx = at;
-    try { hit.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) { }
+    state.tts.hlEl = hit;
+  }
+  const at = paras.indexOf(hit);
+  if (at >= 0) state.tts.paraIdx = at;
+  if (changed) {
+    if (state.settings.mode === 'paged') ttsSyncPagedView();
+    else { try { hit.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) { } }
   }
 }
 function ttsReadableText(ch) {
@@ -5197,6 +5215,7 @@ function stopTTS() {
   const bar = document.getElementById('ttsText');
   if (bar) { bar.classList.remove('show'); bar.textContent = ''; }
   document.querySelectorAll('.tts-current').forEach(el => el.classList.remove('tts-current'));
+  state.tts.hlEl = null;
 }
 function pauseTTS() {
   state.tts.paused = true;
@@ -5211,7 +5230,7 @@ function resumeTTS() {
 // 段落 -> 句子索引：按累积字数对齐（句子表就是同一段文字的切分，字数对得上）
 function ttsSentenceIndexForPara(para) {
   const sents = state.tts.sentences || [];
-  const paras = [...document.querySelectorAll('#readerInner .chapter-body p')];
+  const paras = ttsParagraphs();
   const at = paras.indexOf(para);
   if (at < 0 || !sents.length) return -1;
   const flat = s => String(s || '').replace(/\s+/g, '');

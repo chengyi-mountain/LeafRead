@@ -170,7 +170,7 @@ input, textarea, select { font:inherit; color:inherit; }
 ::-webkit-scrollbar-thumb { background:var(--border-strong); border-radius:2px; }
 
 /* ===== Layout ===== */
-#app { display:flex; flex-direction:column; height:100%; height:100dvh; }
+#app { display:flex; flex-direction:column; height:100%; height:100dvh; position:relative; }
 .topbar {
   display:flex; align-items:center; gap:8px;
   padding: 10px 14px; padding-top: max(10px, var(--safe-top));
@@ -181,6 +181,13 @@ input, textarea, select { font:inherit; color:inherit; }
   transition: transform .35s var(--transition), opacity .35s var(--transition);
 }
 .topbar.hidden { transform:translateY(-110%); opacity:0; pointer-events:none; }
+/* 阅读页：顶栏浮在正文之上（不挤压排版、不透明，呼出即清楚可读） */
+.topbar.floating {
+  position:absolute; top:0; left:0; right:0; z-index:120;
+  background: var(--bg-elev);
+  backdrop-filter: none; -webkit-backdrop-filter: none;
+  box-shadow: 0 2px 14px rgba(0,0,0,.10);
+}
 .topbar .title-group { flex:1; min-width:0; display:flex; flex-direction:column; }
 .topbar .title-group .book-title { font-size:14px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .topbar .title-group .chapter-title { font-size:11px; color:var(--text-sub); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -1961,6 +1968,7 @@ function openBookNow(book) {
 function switchView(view) {
   document.getElementById('viewBookshelf').classList.toggle('hidden', view !== 'bookshelf');
   document.getElementById('viewReader').classList.toggle('hidden', view !== 'reader');
+  document.getElementById('topbar').classList.toggle('floating', view === 'reader');
   if (view === 'bookshelf') {
     hideTopbar();
     closeSidebar();
@@ -4788,7 +4796,7 @@ function switchReadingMode(to, settingsBody) {
   }
   updateProgress();
   saveState();
-  autoHideTopbar();
+  hideTopbar();
 }
 
 function renderPage(pageIdx, animate) {

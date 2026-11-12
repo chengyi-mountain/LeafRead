@@ -642,6 +642,25 @@ mark { background:var(--accent); color:#fff; padding:0 2px; border-radius:2px; }
 .tts-info { flex:1; min-width:0; }
 .tts-info .tts-book { font-size:12px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .tts-info .tts-chapter { font-size:11px; color:var(--text-sub); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.tts-text {
+  position:absolute; left:12px; right:12px; bottom:calc(100% + 8px);
+  background:var(--bg-overlay); border:1px solid var(--border); border-radius:10px;
+  padding:7px 11px; font-size:12.5px; line-height:1.65; color:var(--text-sub);
+  max-height:3.4em; overflow:hidden; display:none; box-shadow:0 2px 10px rgba(0,0,0,.06);
+}
+.tts-text.show { display:block; }
+.tts-current {
+  background:var(--tts-hl, rgba(139,111,71,.15));
+  border-radius:3px;
+  box-shadow:inset 3px 0 0 var(--tts-hl-bar, rgba(139,111,71,.5));
+  transition:background .2s;
+}
+.tts-select {
+  flex:1; min-width:0; max-width:190px; font-size:12px; padding:5px 8px;
+  border-radius:8px; border:1px solid var(--border-strong); background:var(--bg-elev);
+  color:var(--text); font-family:inherit;
+}
+.tts-note { font-size:11px; color:var(--text-muted); margin-top:6px; line-height:1.5; }
 .tts-controls { display:flex; align-items:center; gap:4px; }
 .tts-btn { width:40px; height:40px; border-radius:50%; display:flex; align-items:center; justify-content:center; transition:background .15s; }
 .tts-btn:hover { background:var(--border); }
@@ -1123,6 +1142,7 @@ mark { background:var(--accent); color:#fff; padding:0 2px; border-radius:2px; }
     <div class="tts-book" id="ttsBook"></div>
     <div class="tts-chapter" id="ttsChapter"></div>
   </div>
+  <div class="tts-text" id="ttsText"></div>
   <button class="tts-btn" id="ttsClose" title="关闭">
     <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
   </button>
@@ -1210,6 +1230,9 @@ const state = {
     warmLight: 0,
     flipSound: true,
     shelfView: 'grid',
+    ttsVoice: '',
+    ttsRate: 0.95,
+    ttsPitch: 1,
   },
   progress: {},
   bookmarks: {},
@@ -1912,6 +1935,8 @@ function renderTOC(body) {
 // Settings panel
 function renderSettings(body) {
   const s = state.settings;
+  const voiceOpts = ttsVoiceOptions(s.ttsVoice);
+  const voiceCount = ttsAllVoices().length;
   body.innerHTML = `
     <div class="settings-group">
       <button class="reset-btn" id="resetSettings">恢复默认设置</button>
@@ -1996,6 +2021,34 @@ function renderSettings(body) {
         <div class="toggle ${s.pdfTextMode?'on':''}" id="togglePdfText"></div>
       </div>
     </div>
+      <div class="settings-group">
+      <div class="settings-group-title">朗读</div>
+      <div class="setting-row">
+        <label>音色</label>
+        <select class="tts-select" id="setTtsVoice">${voiceOpts}</select>
+      </div>
+      <div class="setting-row">
+        <label>语速</label>
+        <div class="setting-control">
+          <input type="range" class="slider" id="setTtsRate" min="0.6" max="1.6" step="0.05" value="${s.ttsRate}">
+          <span class="value-display" id="valTtsRate">${(+s.ttsRate).toFixed(2)}</span>
+        </div>
+      </div>
+      <div class="setting-row">
+        <label>音调</label>
+        <div class="setting-control">
+          <input type="range" class="slider" id="setTtsPitch" min="0.6" max="1.4" step="0.05" value="${s.ttsPitch}">
+          <span class="value-display" id="valTtsPitch">${(+s.ttsPitch).toFixed(2)}</span>
+        </div>
+      </div>
+      <div class="setting-row">
+        <label>试听</label>
+        <div class="setting-control">
+          <button class="reset-btn" id="ttsTry" style="flex:0 0 auto;padding:6px 14px;margin:0">朗读一句听听</button>
+        </div>
+      </div>
+      <div class="tts-note">${voiceCount ? '本机可用音色 ' + voiceCount + ' 个，来自你的浏览器/系统。安卓与 iPhone 各有不同的中文音色，换个设备声音会不一样。' : '音色列表还没加载出来，点一下「朗读一句听听」试试；如果仍失败，说明这台设备没装中文语音包。'}</div>
+    </div>
     <div class="settings-group">
       <div class="settings-group-title">护眼</div>
       <div class="setting-row">
@@ -2042,6 +2095,23 @@ function renderSettings(body) {
   };
   body.querySelector('#toggleSound').onclick = function() { s.flipSound = !s.flipSound; saveState(); renderSettings(body); };
   body.querySelector('#setWarm').oninput = e => { s.warmLight = +e.target.value; document.getElementById('valWarm').textContent = Math.round(e.target.value*100)+'%'; applySettings(); };
+  const voiceSel = body.querySelector('#setTtsVoice');
+  if (voiceSel) voiceSel.onchange = e => {
+    s.ttsVoice = e.target.value;
+    saveState();
+    toast(e.target.value ? '已切换音色：' + ttsVoiceLabel({ name: ttsVoiceFindName(e.target.value), lang: '' }) : '已切回自动挑选音色', 'success');
+  };
+  body.querySelector('#setTtsRate').oninput = e => {
+    s.ttsRate = +e.target.value;
+    document.getElementById('valTtsRate').textContent = (+e.target.value).toFixed(2);
+    saveState();
+  };
+  body.querySelector('#setTtsPitch').oninput = e => {
+    s.ttsPitch = +e.target.value;
+    document.getElementById('valTtsPitch').textContent = (+e.target.value).toFixed(2);
+    saveState();
+  };
+  body.querySelector('#ttsTry').onclick = () => ttsTrySample();
   body.querySelectorAll('.mode-tab[data-shelf]').forEach(el => el.onclick = () => { s.shelfView = el.dataset.shelf; saveState(); renderSettings(body); renderBookshelf(); });
   
   // Show/hide paged-only settings
@@ -4012,101 +4082,289 @@ function playFlipSound() {
 }
 
 // ===== TTS (Text-to-Speech) =====
+/* ===== 朗读（TTS）=====
+   要点：可选音色（浏览器/系统提供）、语速音调可调、按句换气（长句在逗号处断开），
+   读完一句有停顿，当前段落高亮，避免一段话一口气念完那种生硬感。 */
+const TTS_NAME_RULES = [
+  ['晓晓', '晓晓 · 女声（自然）'], ['Xiaoxiao', '晓晓 · 女声（自然）'],
+  ['晓伊', '晓伊 · 女声'], ['Xiaoyi', '晓伊 · 女声'],
+  ['晓悠', '晓悠 · 女声'], ['晓辰', '晓辰 · 女声'],
+  ['晓梦', '晓梦 · 女声'], ['晓墨', '晓墨 · 女声'], ['Xiaomo', '晓墨 · 女声'],
+  ['晓涵', '晓涵 · 女声'], ['Xiaohan', '晓涵 · 女声'],
+  ['云希', '云希 · 男声（自然）'], ['Yunxi', '云希 · 男声（自然）'],
+  ['云扬', '云扬 · 男声'], ['Yunyang', '云扬 · 男声'],
+  ['云健', '云健 · 男声'], ['Yunjian', '云健 · 男声'],
+  ['云夏', '云夏 · 男声'], ['Yunxia', '云夏 · 男声'],
+  ['云皓', '云皓 · 男声'], ['云松', '云松 · 男声'],
+  ['慧慧', '慧慧 · 女声'], ['Huihui', '慧慧 · 女声'],
+  ['瑶瑶', '瑶瑶 · 女声'], ['Yaoyao', '瑶瑶 · 女声'],
+  ['康康', '康康 · 男声'], ['Kangkang', '康康 · 男声'],
+  ['婷婷', '婷婷 · 女声'], ['Tingting', '婷婷 · 女声'], ['Ting-Ting', '婷婷 · 女声'],
+  ['美佳', '美佳 · 台湾腔'], ['Mei-Jia', '美佳 · 台湾腔'],
+  ['Tracy', 'Tracy · 粤语'], ['Danny', 'Danny · 粤语'],
+  ['Google', '谷歌 · 普通话'],
+];
+function ttsVoiceLabel(v) {
+  const name = (v && v.name) || '';
+  const hit = TTS_NAME_RULES.find(r => name.indexOf(r[0]) >= 0);
+  if (hit) return hit[1];
+  const clean = name.replace(/^Microsoft\s+/i, '').replace(/\(Natural\)|Online|Natural/gi, ' ')
+    .replace(/\s*-\s*Chinese.*$/i, '').replace(/\s+/g, ' ').trim();
+  return (clean || name || '未命名音色') + ((v && v.lang) ? '（' + v.lang + '）' : '');
+}
+function ttsVoiceFindName(uri) {
+  const v = ttsAllVoices().find(x => x.voiceURI === uri);
+  return v ? v.name : '音色';
+}
+function ttsAllVoices() {
+  try { return (window.speechSynthesis && speechSynthesis.getVoices()) || []; } catch (e) { return []; }
+}
+function ttsLang() {
+  return (state.currentBook && state.currentBook.lang === 'en') ? 'en' : 'zh';
+}
+/* 可用音色列表（中文优先，再给几个英文） */
+function ttsVoiceOptions(selected) {
+  const vs = ttsAllVoices();
+  const isZh = v => /^(zh|cmn)/i.test(v.lang || '') || /Chinese|普通话|粤语|中文/i.test(v.name || '');
+  const zh = vs.filter(isZh);
+  const en = vs.filter(v => /^en/i.test(v.lang || '') && !isZh(v));
+  const opts = ['<option value="">自动挑选（推荐）</option>'];
+  const seen = {};
+  const add = v => {
+    const label = ttsVoiceLabel(v);
+    const dedupeKey = label.replace(/（.*?）/g, '');
+    if (seen[dedupeKey] && v.voiceURI !== selected) return;
+    seen[dedupeKey] = 1;
+    opts.push('<option value="' + escapeHtml(v.voiceURI) + '"' + (v.voiceURI === selected ? ' selected' : '') + '>' +
+      escapeHtml(label) + '</option>');
+  };
+  zh.forEach(add);
+  en.slice(0, 8).forEach(add);
+  return opts.join('');
+}
+/* 选音色：用户选过就用用户的；否则优先挑中文「自然」那一档，再退到任意中文、任意音色 */
+function ttsPickVoice() {
+  const vs = ttsAllVoices();
+  if (!vs.length) return null;
+  const chosen = state.settings.ttsVoice && vs.find(v => v.voiceURI === state.settings.ttsVoice);
+  if (chosen) return chosen;
+  const wantZh = ttsLang() === 'zh';
+  const zh = vs.filter(v => /^(zh|cmn)/i.test(v.lang || '') || /Chinese|普通话|中文/i.test(v.name || ''));
+  if (wantZh && zh.length) {
+    const natural = zh.find(v => /晓晓|Xiaoxiao|晓伊|Xiaoyi|云希|Yunxi|云扬|Yunyang|云健|Yunjian|晓辰|晓悠/i.test(v.name || ''))
+      || zh.find(v => /Natural|自然/i.test(v.name || ''));
+    return natural || zh[0];
+  }
+  const en = vs.filter(v => /^en/i.test(v.lang || ''));
+  const enBest = en.find(v => /en-US/i.test(v.lang || '') && /Natural|Aria|Jenny|Guy|Zira|David|Mark/i.test(v.name || ''))
+    || en.find(v => /en-US|en-GB/i.test(v.lang || ''))
+    || en[0];
+  return (wantZh ? null : enBest) || zh[0] || vs[0];
+}
+/* 断句：先按句末标点切成句，太长的再在逗号处断开——浏览器一次念一小段比一口气念完自然得多 */
+function ttsSplitText(text) {
+  const clean = String(text || '')
+    .replace(/[⋯…]{2,}/g, '……')
+    .replace(/[\[\uFF3B]\s*\d{1,3}\s*[\]\uFF3D]/g, '')
+    .replace(/\u3000/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!clean) return [];
+  const sentences = clean.split(/(?<=[。！？!?；;])/).map(s => s.trim()).filter(Boolean)
+    .flatMap(seg => seg.split(/(?<=[.!?])[ ]+/).map(t => t.trim()).filter(Boolean));
+  const out = [];
+  sentences.forEach(seg => {
+    if (seg.length <= 60) { out.push(seg); return; }
+    const pieces = seg.split(/(?<=[，、：:,])/);
+    let acc = '';
+    pieces.forEach(p => {
+      p = p.trim();
+      if (!p) return;
+      if ((acc + p).length > 60 && acc) { out.push(acc); acc = p; }
+      else acc += p;
+    });
+    if (acc) out.push(acc);
+  });
+  return out.filter(s => s && s.length);
+}
+function ttsWriteSpeed(sentence) {
+  const bar = document.getElementById('ttsText');
+  if (!bar) return;
+  bar.textContent = sentence;
+  bar.classList.add('show');
+}
+function ttsHighlight(sentence) {
+  ttsWriteSpeed(sentence);
+  document.querySelectorAll('.tts-current').forEach(el => el.classList.remove('tts-current'));
+  const flat = String(sentence || '').replace(/\s+/g, '');
+  if (!flat) return;
+  const paras = document.querySelectorAll('#readerInner .chapter-body p');
+  let hit = null;
+  // 先按「段落开头」找：句子跨了段（比如带章节标题）也能命中
+  for (let i = 0; i < paras.length && !hit; i++) {
+    const t = paras[i].textContent.replace(/\s+/g, '');
+    if (t.length >= 4 && flat.indexOf(t.slice(0, 6)) >= 0) hit = paras[i];
+  }
+  // 兜底：拿句子里的几段候选去段落正文里找
+  if (!hit && flat.length >= 4) {
+    const cands = [0, 4, 8].map(off => flat.slice(off, off + 12)).filter(s => s.length >= 4);
+    for (let i = 0; i < paras.length && !hit; i++) {
+      const t = paras[i].textContent.replace(/\s+/g, '');
+      if (cands.some(c => t.indexOf(c) >= 0)) hit = paras[i];
+    }
+  }
+  if (hit) {
+    hit.classList.add('tts-current');
+    try { hit.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) { }
+  }
+}
+function ttsReadableText(ch) {
+  if (!ch) return '';
+  if (ch.pdfPage || ch.imageUrl) return '';
+  return (typeof chapterBodyText === 'function') ? chapterBodyText(ch) : (ch.body || '');
+}
+function ttsLoadChapter(ch) {
+  let raw = ttsReadableText(ch);
+  // 有些格式（TXT 分章）会把章节标题并进正文，念的时候不必重复标题
+  const ti = String((ch && ch.title) || '').replace(/\s+/g, '');
+  const flat = raw.replace(/\s+/g, '');
+  if (ti && flat.indexOf(ti) === 0) raw = flat.slice(ti.length);
+  state.tts.sentences = ttsSplitText(raw);
+  state.tts.currentIndex = 0;
+}
+function ttsCancel(then) {
+  try { speechSynthesis.cancel(); } catch (e) { }
+  if (typeof then === 'function') setTimeout(then, 90);   // 立刻 cancel+speak 在 Chrome 上会吞掉第一句
+}
 function toggleTTS() {
   if (state.tts.active) { stopTTS(); return; }
   startTTS();
 }
 function startTTS() {
   if (!('speechSynthesis' in window)) { toast('当前浏览器不支持朗读', 'error'); return; }
-  
-  const ch = state.currentBook.chapters[state.currentChapter];
-  const text = ch.body;
-  // Split into sentences
-  const sentences = text.split(/(?<=[。！？.!?\n])\s*/).filter(s => s.trim().length > 0);
-  
+  const book = state.currentBook;
+  if (!book) { toast('先打开一本书再朗读', 'error'); return; }
+  const ch = book.chapters[state.currentChapter];
+  const raw = ttsReadableText(ch);
+  if (!raw.trim()) { toast('这一页是图片，没有可朗读的文字', 'error'); return; }
+  ttsLoadChapter(ch);
+  if (!state.tts.sentences.length) { toast('这一章没有可朗读的文字', 'error'); return; }
+
   state.tts.active = true;
-  state.tts.sentences = sentences;
-  state.tts.currentIndex = 0;
   state.tts.paused = false;
-  
+  state.tts.lastSpeakAt = 0;
+  state.tts.gen = (state.tts.gen || 0) + 1;
   document.getElementById('ttsBar').classList.add('show');
-  document.getElementById('ttsBook').textContent = state.currentBook.title;
+  document.getElementById('ttsBook').textContent = book.title;
   document.getElementById('ttsChapter').textContent = ch.title || '';
-  
-  speakSentence();
+  ttsEnsureWatchdog();
+  ttsCancel(() => ttsPlayCurrent());
 }
-function speakSentence() {
-  if (!state.tts.active) return;
+function ttsPlayCurrent() {
+  if (!state.tts.active || state.tts.paused) return;
+  const list = state.tts.sentences || [];
   const idx = state.tts.currentIndex;
-  if (idx >= state.tts.sentences.length) {
-    // Next chapter
-    if (state.currentChapter < state.currentBook.chapters.length - 1) {
-      renderChapter(state.currentChapter + 1, false);
-      setTimeout(() => { state.tts.sentences = state.currentBook.chapters[state.currentChapter].body.split(/(?<=[。！？.!?\n])\s*/).filter(s=>s.trim().length>0); state.tts.currentIndex=0; speakSentence(); }, 200);
-    } else { stopTTS(); }
-    return;
-  }
-  
-  const u = new SpeechSynthesisUtterance(state.tts.sentences[idx]);
-  const lang = state.currentBook.lang === 'zh' ? 'zh-CN' : 'en-US';
-  u.lang = lang;
-  u.rate = 1.0;
-  u.pitch = 1.0;
-  u.onend = () => { if (state.tts.active) { state.tts.currentIndex++; speakSentence(); } };
-  u.onerror = () => { if (state.tts.active) { state.tts.currentIndex++; speakSentence(); } };
+  if (idx >= list.length) { return ttsNextChapter(); }
+  const text = list[idx];
+  const gen = state.tts.gen || 0;
+  ttsHighlight(text);
+
+  const u = new SpeechSynthesisUtterance(text);
+  const v = ttsPickVoice();
+  if (v) u.voice = v;
+  u.lang = (v && v.lang) || (ttsLang() === 'zh' ? 'zh-CN' : 'en-US');
+  u.rate = Math.max(0.5, Math.min(2, +(state.settings.ttsRate || 0.95)));
+  u.pitch = Math.max(0.5, Math.min(2, +(state.settings.ttsPitch || 1)));
+  u.onend = () => {
+    if (!state.tts.active || state.tts.paused) return;
+    if (gen !== (state.tts.gen || 0)) return;
+    const isSentenceEnd = /[。！？!?；;]$/.test(text);
+    state.tts.currentIndex++;
+    state.tts.timer = setTimeout(ttsPlayCurrent, isSentenceEnd ? 240 : 100);
+  };
+  u.onerror = (e) => {
+    if (!state.tts.active || state.tts.paused) return;
+    if (gen !== (state.tts.gen || 0)) return;
+    const err = (e && e.error) || '';
+    if (err === 'interrupted' || err === 'canceled') return;
+    state.tts.currentIndex++;
+    state.tts.timer = setTimeout(ttsPlayCurrent, 120);
+  };
   state.tts.utter = u;
+  state.tts.lastSpeakAt = Date.now();
   speechSynthesis.speak(u);
+}
+function ttsNextChapter() {
+  const book = state.currentBook;
+  if (!book) { stopTTS(); return; }
+  let n = state.currentChapter + 1;
+  while (n < book.chapters.length && !ttsReadableText(book.chapters[n]).trim()) n++;
+  if (n >= book.chapters.length) { toast('这本读完了'); stopTTS(); return; }
+  renderChapter(n, false);
+  ttsLoadChapter(book.chapters[n]);
+  setTimeout(() => { if (state.tts.active) ttsPlayCurrent(); }, 260);
+}
+function ttsEnsureWatchdog() {
+  if (state.tts.watch) clearInterval(state.tts.watch);
+  state.tts.watch = setInterval(() => {
+    if (!state.tts.active || state.tts.paused) return;
+    if (speechSynthesis.speaking || speechSynthesis.pending) return;
+    if (Date.now() - (state.tts.lastSpeakAt || 0) > 3500) ttsPlayCurrent();
+  }, 3000);
 }
 function stopTTS() {
   state.tts.active = false;
   state.tts.paused = false;
-  speechSynthesis.cancel();
+  clearTimeout(state.tts.timer);
+  state.tts.gen = (state.tts.gen || 0) + 1;
+  if (state.tts.watch) { clearInterval(state.tts.watch); state.tts.watch = null; }
+  try { speechSynthesis.cancel(); } catch (e) { }
   document.getElementById('ttsBar').classList.remove('show');
-}
-
-// 通用朗读函数（可朗读任意文本）
-function speakText(text) {
-  if (!text || !text.trim()) { toast('没有可朗读的内容', 'error'); return; }
-  if (!('speechSynthesis' in window)) { toast('当前浏览器不支持朗读', 'error'); return; }
-
-  speechSynthesis.cancel();
-  const u = new SpeechSynthesisUtterance(text.trim());
-  u.lang = state.currentBook && state.currentBook.lang === 'zh' ? 'zh-CN' : 'en-US';
-  u.rate = 1.0;
-  u.pitch = 1.0;
-  u.onend = () => { state.tts.active = false; };
-  state.tts.active = true;
-  state.tts.utter = u;
-  speechSynthesis.speak(u);
-
-  // 更新 TTS 栏显示
-  document.getElementById('ttsBar').classList.add('show');
-  document.getElementById('ttsBook').textContent = '指定朗读';
-  document.getElementById('ttsChapter').textContent = text.slice(0, 30) + (text.length > 30 ? '…' : '');
-
-  toast('开始朗读');
+  const bar = document.getElementById('ttsText');
+  if (bar) { bar.classList.remove('show'); bar.textContent = ''; }
+  document.querySelectorAll('.tts-current').forEach(el => el.classList.remove('tts-current'));
 }
 function pauseTTS() {
   state.tts.paused = true;
+  clearTimeout(state.tts.timer);
   speechSynthesis.pause();
 }
 function resumeTTS() {
   state.tts.paused = false;
   speechSynthesis.resume();
+  if (!speechSynthesis.speaking) ttsCancel(() => ttsPlayCurrent());
 }
 function nextTTSSentence() {
-  if (state.tts.currentIndex < state.tts.sentences.length - 1) {
-    speechSynthesis.cancel();
-    state.tts.currentIndex++;
-    speakSentence();
-  }
+  if (!state.tts.active) return;
+  clearTimeout(state.tts.timer);
+  state.tts.gen = (state.tts.gen || 0) + 1;
+  if (state.tts.currentIndex < state.tts.sentences.length - 1) state.tts.currentIndex++;
+  ttsCancel(() => ttsPlayCurrent());
 }
 function prevTTSSentence() {
-  if (state.tts.currentIndex > 0) {
-    speechSynthesis.cancel();
-    state.tts.currentIndex--;
-    speakSentence();
-  }
+  if (!state.tts.active) return;
+  clearTimeout(state.tts.timer);
+  state.tts.gen = (state.tts.gen || 0) + 1;
+  if (state.tts.currentIndex > 0) state.tts.currentIndex--;
+  ttsCancel(() => ttsPlayCurrent());
+}
+function ttsTrySample() {
+  if (!('speechSynthesis' in window)) { toast('当前浏览器不支持朗读', 'error'); return; }
+  const u = new SpeechSynthesisUtterance('这是试听。夜里山风穿过树林，屋里的灯还亮着，读书人翻过一页，又翻过一页。');
+  const v = ttsPickVoice();
+  if (v) u.voice = v;
+  u.lang = (v && v.lang) || (ttsLang() === 'zh' ? 'zh-CN' : 'en-US');
+  u.rate = Math.max(0.5, Math.min(2, +(state.settings.ttsRate || 0.95)));
+  u.pitch = Math.max(0.5, Math.min(2, +(state.settings.ttsPitch || 1)));
+  ttsCancel(() => speechSynthesis.speak(u));
+}
+/* 音色列表是异步加载的（尤其安卓），加载好以后把设置面板刷一遍 */
+if ('speechSynthesis' in window) {
+  const refreshVoiceOptions = () => {
+    const sel = document.getElementById('setTtsVoice');
+    if (sel && document.getElementById('sidebarBody')) renderSettings(document.getElementById('sidebarBody'));
+  };
+  try { speechSynthesis.addEventListener('voiceschanged', refreshVoiceOptions); } catch (e) { }
 }
 
 // ===== Word tooltip (dict / translate) =====
@@ -4326,8 +4584,10 @@ function speakSelectionOnly() {
   // 朗读选中文本
   const u = new SpeechSynthesisUtterance(text);
   u.lang = state.currentBook.lang === 'zh' ? 'zh-CN' : 'en-US';
-  u.rate = 1.0;
-  u.pitch = 1.0;
+  const ttsV = ttsPickVoice();
+  if (ttsV) u.voice = ttsV;
+  u.rate = Math.max(0.5, Math.min(2, +(state.settings.ttsRate || 0.95)));
+  u.pitch = Math.max(0.5, Math.min(2, +(state.settings.ttsPitch || 1)));
   u.onend = () => { state.tts.active = false; };
   state.tts.active = true;
   state.tts.utter = u;

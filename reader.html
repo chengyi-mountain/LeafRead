@@ -2170,6 +2170,17 @@ function autoHideTopbar() {
   state.ui.topbarTimer = setTimeout(hideTopbar, 2500);
 }
 
+function toggleTopbar() {
+  const tb = document.getElementById('topbar');
+  if (!tb) return;
+  if (tb.classList.contains('hidden')) {
+    clearTimeout(state.ui.topbarTimer);
+    showTopbar();
+  } else {
+    hideTopbar();
+  }
+}
+
 // ===== Sidebar =====
 function openSidebar(mode) {
   state.ui.sidebarMode = mode;
@@ -2423,9 +2434,7 @@ function renderSettings(body) {
   body.querySelector('#setLetterSpacing').oninput = e => { s.letterSpacing = +e.target.value; document.getElementById('valLetterSpacing').textContent = e.target.value; applySettings(); if(s.mode==='paged') renderPage(state.pageIndex||0,false); };
   body.querySelector('#setContentWidth').oninput = e => { s.contentWidth = +e.target.value; document.getElementById('valContentWidth').textContent = e.target.value; applySettings(); if(s.mode==='paged') renderPage(state.pageIndex||0,false); };
   body.querySelectorAll('.mode-tab[data-mode]').forEach(el => el.onclick = () => {
-    s.mode = el.dataset.mode; saveState(); renderSettings(body); setReaderMode();
-    if (s.mode === 'paged') { state.pageIndex = 0; renderPage(0, false); }
-    else { document.getElementById('readerContent').scrollTop = getProgress(state.currentBook.id).scrollY || 0; }
+    switchReadingMode(el.dataset.mode, body);
   });
   body.querySelectorAll('.seg-btn[data-anim]').forEach(el => el.onclick = () => { s.animType = el.dataset.anim; saveState(); renderSettings(body); });
   body.querySelector('#toggleShadow').onclick = function() { s.pageShadow = !s.pageShadow; saveState(); renderSettings(body); };
@@ -4735,6 +4744,53 @@ function calcTotalPages() {
   return Math.max(1, Math.round((canvas.scrollWidth || stride) / stride));
 }
 
+/* 换阅读模式时保住位置：把当前位置换算成“整章读到百分之几”，再落到对应的页 / 滚动高度。
+   一章往往只有一两个大段落，按段落做锚点会退化成“从头开始”，所以用比例 + 首段位置校准。 */
+function readerScrollRatio() {
+  const content = document.getElementById('readerContent');
+  if (!content) return 0;
+  const span = Math.max(1, content.scrollHeight - content.clientHeight);
+  return Math.max(0, Math.min(1, content.scrollTop / span));
+}
+
+/* 滚动 / 翻页互转，不回到第一页 */
+function switchReadingMode(to, settingsBody) {
+  const s = state.settings;
+  if (!s || (to !== 'scroll' && to !== 'paged') || s.mode === to) return;
+  const ch = state.currentBook && state.currentBook.chapters && state.currentBook.chapters[state.currentChapter];
+  const isPageOnly = !!(ch && (ch.pdfPage || ch.imageUrl));
+  const from = s.mode;
+  const fromRatio = (!isPageOnly && from === 'scroll') ? readerScrollRatio() : 0;
+  const fromPage = state.pageIndex || 0;
+  const fromTotal = state.totalPages || 1;
+
+  s.mode = to;
+  saveState();
+  if (settingsBody) renderSettings(settingsBody);
+  setReaderMode();
+  if (isPageOnly) { toast('原页 PDF / 整页图片固定单页滚动显示'); return; }
+
+  if (to === 'paged') {
+    renderPage(0, false);
+    const total = state.totalPages || 1;
+    const target = total > 1 ? Math.round(fromRatio * (total - 1)) : 0;
+    renderPage(target, false);
+    state.pageIndex = target;
+  } else {
+    const content = document.getElementById('readerContent');
+    const ratio = fromTotal > 1 ? fromPage / (fromTotal - 1) : 0;
+    if (content) {
+      const span = Math.max(0, content.scrollHeight - content.clientHeight);
+      content.style.scrollBehavior = 'auto';
+      content.scrollTop = ratio * span;
+      requestAnimationFrame(() => { content.style.scrollBehavior = ''; });
+    }
+  }
+  updateProgress();
+  saveState();
+  autoHideTopbar();
+}
+
 function renderPage(pageIdx, animate) {
   if (state.settings.mode !== 'paged') return;
   const ch = state.currentBook.chapters[state.currentChapter];
@@ -5491,19 +5547,29 @@ function bindEvents() {
   document.getElementById('readerContent').onscroll = () => {
     if (state.settings.mode === 'scroll') {
       updateProgress();
-      autoHideTopbar();
+      // 滑动时把顶栏收起来（不要每滑一下就弹一次），想唤出来轻点正文即可
+      clearTimeout(state.ui.topbarTimer);
+      if (!document.getElementById('topbar').classList.contains('hidden')) hideTopbar();
     }
   };
   
   // Reader click zones (paged mode)
   document.getElementById('clickLeft').onclick = e => { e.stopPropagation(); prevPage(); };
   document.getElementById('clickRight').onclick = e => { e.stopPropagation(); nextPage(); };
-  document.getElementById('clickCenter').onclick = e => {
-    e.stopPropagation();
-    const tb = document.getElementById('topbar');
-    if (tb.classList.contains('hidden')) { showTopbar(); autoHideTopbar(); }
-    else hideTopbar();
-  };
+  document.getElementById('clickCenter').onclick = e => { e.stopPropagation(); toggleTopbar(); };
+
+  // 滚动模式：轻点正文呼出 / 收起顶栏（刚滑动过、或正在选字时不触发）
+  const contentEl = document.getElementById('readerContent');
+  let lastScrollAt = 0;
+  contentEl.addEventListener('scroll', () => { lastScrollAt = Date.now(); }, { passive: true });
+  contentEl.addEventListener('click', e => {
+    if (state.settings.mode !== 'scroll') return;
+    if (Date.now() - lastScrollAt < 500) return;
+    const sel = window.getSelection && window.getSelection();
+    if (sel && String(sel).trim().length > 0) return;
+    if (e.target && e.target.closest && e.target.closest('a')) return;
+    toggleTopbar();
+  });
   // In paged mode, tapping the screen edges should not show topbar permanently
   const reader2 = document.getElementById('reader');
   reader2.addEventListener('click', e => {
@@ -5646,10 +5712,8 @@ function bindEvents() {
   };
   document.getElementById('rbTheme').onclick = cycleTheme;
   document.getElementById('rbMode').onclick = () => {
-    state.settings.mode = state.settings.mode === 'scroll' ? 'paged' : 'scroll';
-    saveState(); setReaderMode();
-    if (state.settings.mode === 'paged') renderPage(0, false);
-    else { document.getElementById('readerContent').scrollTop = getProgress(state.currentBook.id).scrollY || 0; }
+    const to = state.settings.mode === 'scroll' ? 'paged' : 'scroll';
+    switchReadingMode(to);
     toast(state.settings.mode === 'paged' ? '翻页模式' : '滚动模式');
   };
   

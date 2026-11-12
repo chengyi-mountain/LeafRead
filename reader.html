@@ -2715,12 +2715,20 @@ function parseFile(file) {
         const zip = await unzipEntries(buf);
         const info = await extractEpubFromZip(zip);
         if (!info.text.trim()) throw new Error('EPUB 内没有可读正文');
-        const chapters = splitTextIntoChapters(info.text);
+        let chapters = await buildEpubChaptersFromToc(info.zip, info.order, info.toc);
+        let tocNote = '';
+        if (chapters) {
+          tocNote = '按 EPUB 自带目录分章，共 ' + chapters.length + ' 章';
+        } else {
+          chapters = splitTextIntoChapters(info.text);
+          tocNote = '这本 EPUB 没有可用目录，按文件顺序分章（' + chapters.length + ' 章）';
+        }
         resolve({
           title: info.title || name.replace(/\.epub$/i, ''),
           author: info.author || '佚名',
           cover: 'imported', format: 'epub',
-          lang: detectLang(info.text), chapters
+          lang: detectLang(info.text), chapters,
+          note: tocNote
         });
       } catch (e) { reject(e); }
     } else if (ext === 'html' || ext === 'htm') {
@@ -2908,6 +2916,8 @@ function stripHtmlToText(html) {
   return String(html)
     .replace(/<script[\s\S]*?<\/script>/gi, '')
     .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<head[\s\S]*?<\/head>/gi, '')
+    .replace(/<title[\s\S]*?<\/title>/gi, '')
     .replace(/<\/(p|div|h[1-6]|li|tr|section|article)>/gi, '\n\n')
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<[^>]+>/g, '')
@@ -2922,19 +2932,130 @@ function stripHtmlToText(html) {
     .trim();
 }
 
+// 读取 EPUB 目录：优先 NCX（EPUB2），退到 nav.xhtml（EPUB3）
+async function readEpubToc(zip, dir, manifest) {
+  const fileOf = p => decodeURIComponent(String(p || '')).replace(/^(\.\/)+/, '').replace(/^\/+/, '').split('#')[0];
+  let ncxPath = '';
+  for (const id in (manifest || {})) {
+    const it = manifest[id] || {};
+    if (/dtbncx/i.test(it.media || '') || /\.ncx$/i.test(it.href || '')) { ncxPath = it.href; break; }
+  }
+  if (!ncxPath) ncxPath = zip.names.find(n => /\.ncx$/i.test(n)) || '';
+  if (ncxPath) {
+    const xml = (await zip.readText(ncxPath)) || '';
+    if (xml) {
+      const out = [];
+      let depth = 0, cur = null;
+      const re = /<navPoint\b[^>]*>|<\/navPoint>|<text[^>]*>([\s\S]*?)<\/text>|<content[^>]*src="([^"']+)"/gi;
+      let m;
+      while ((m = re.exec(xml)) !== null) {
+        const tag = m[0];
+        if (/^<navPoint/i.test(tag)) { depth++; cur = { depth, title: '', file: '' }; continue; }
+        if (/^<\/navPoint/i.test(tag)) { depth = Math.max(0, depth - 1); continue; }
+        if (m[1] !== undefined) {
+          if (cur && !cur.title) cur.title = stripHtmlToText(m[1]).replace(/\s+/g, ' ').trim();
+          continue;
+        }
+        if (m[2] !== undefined && cur && !cur.file) {
+          cur.file = dir + fileOf(m[2]);
+          out.push(cur);
+        }
+      }
+      if (out.length >= 2) return out;
+    }
+  }
+  // EPUB3 nav.xhtml
+  for (const p of zip.names.filter(n => /\.(xhtml|html|htm)$/i.test(n))) {
+    const xml = (await zip.readText(p)) || '';
+    if (!/<nav[^>]*(toc|epub:type\s*=\s*["']toc["'])/i.test(xml)) continue;
+    const navStart = xml.search(/<nav[^>]*(toc|epub:type\s*=\s*["']toc["'])/i);
+    const block = xml.slice(navStart);
+    const out = [];
+    let depth = 0, cur = null;
+    const base = p.includes('/') ? p.slice(0, p.lastIndexOf('/') + 1) : '';
+    const re = /<ol\b|<\/ol>|<li\b[^>]*>|<a[^>]*href="([^"']+)"[^>]*>([\s\S]*?)<\/a>/gi;
+    let m;
+    while ((m = re.exec(block)) !== null) {
+      const tag = m[0];
+      if (/^<ol/i.test(tag)) { depth++; continue; }
+      if (/^<\/ol/i.test(tag)) { depth = Math.max(0, depth - 1); continue; }
+      if (/^<li/i.test(tag)) { cur = { depth: depth || 1, title: '', file: '' }; continue; }
+      if (m[1] !== undefined && cur && !cur.file) {
+        cur.file = base + fileOf(m[1]);
+        cur.title = stripHtmlToText(m[2]).replace(/\s+/g, ' ').trim();
+        out.push(cur);
+      }
+    }
+    if (out.length >= 2) return out;
+  }
+  return [];
+}
+
+// 用目录把 spine 文件合并成真正的章节：同一条目录下的多个文件并进同一章
+async function buildEpubChaptersFromToc(zip, order, toc) {
+  if (!toc || !toc.length || !order || !order.length) return null;
+  const norm = p => decodeURIComponent(String(p || '')).replace(/^(\.\/)+/, '').replace(/^\/+/, '').split('#')[0];
+  const idxByFile = {};
+  order.forEach((p, i) => { idxByFile[norm(p)] = i; });
+  const entries = [];
+  for (const t of toc) {
+    const f = norm(t.file).toLowerCase();
+    let idx = idxByFile[norm(t.file)];
+    if (idx === undefined) {
+      const hit = Object.keys(idxByFile).find(k => {
+        const kk = k.toLowerCase();
+        return kk === f || kk.endsWith('/' + f) || f.endsWith('/' + kk) || kk.endsWith(f);
+      });
+      if (hit !== undefined) idx = idxByFile[hit];
+    }
+    if (idx === undefined) continue;
+    entries.push({ depth: t.depth || 1, title: String(t.title || '').trim(), idx });
+  }
+  if (entries.length < 2) return null;
+  const minDepth = Math.min(...entries.map(e => e.depth));
+  const tops = entries.filter(e => e.depth === minDepth);
+  if (tops.length < 2) return null;
+  const chapters = [];
+  for (let i = 0; i < tops.length; i++) {
+    const start = i === 0 ? 0 : tops[i].idx;
+    let end = (i + 1 < tops.length) ? tops[i + 1].idx : order.length;
+    if (end <= start) end = Math.min(order.length, start + 1);
+    const parts = [];
+    for (let k = start; k < end; k++) {
+      const html = await zip.readText(order[k]);
+      const txt = stripHtmlToText(html || '');
+      if (txt) parts.push(txt);
+    }
+    chapters.push({
+      title: tops[i].title || ('第 ' + (i + 1) + ' 章'),
+      body: parts.join('\n\n').trim()
+    });
+  }
+  const merged = [];
+  for (const c of chapters) {
+    const prev = merged[merged.length - 1];
+    if (prev && c.title && prev.title === c.title) {
+      prev.body = (prev.body + '\n\n' + c.body).trim();
+      continue;
+    }
+    merged.push(c);
+  }
+  const kept = merged.filter(c => c.body && c.body.length);
+  return kept.length ? kept : null;
+}
+
 // 解析 EPUB：按 OPF 的 spine 顺序读取正文
 async function extractEpubFromZip(zip) {
   let opfPath = zip.names.find(n => /\.opf$/i.test(n));
   let order = [];
   let metaTitle = '', metaAuthor = '';
+  let dir = '', manifest = {}, toc = [], spineFiles = [];
 
   if (opfPath) {
     const opf = (await zip.readText(opfPath)) || '';
     metaTitle = (opf.match(/<dc:title[^>]*>([\s\S]*?)<\/dc:title>/i) || [])[1] || '';
     metaAuthor = (opf.match(/<dc:creator[^>]*>([\s\S]*?)<\/dc:creator>/i) || [])[1] || '';
-    const dir = opfPath.includes('/') ? opfPath.slice(0, opfPath.lastIndexOf('/') + 1) : '';
-
-    const manifest = {};
+    dir = opfPath.includes('/') ? opfPath.slice(0, opfPath.lastIndexOf('/') + 1) : '';
     const itemRe = /<item\b[^>]*>/gi;
     let im;
     while ((im = itemRe.exec(opf)) !== null) {
@@ -2949,7 +3070,9 @@ async function extractEpubFromZip(zip) {
     while ((sm = spineRe.exec(opf)) !== null) {
       const item = manifest[sm[1]];
       if (item && /(html|xml)/i.test(item.media || item.href)) {
-        order.push(decodeURIComponent(item.href).replace(/^(\.\/)+/, ''));
+        const hp = decodeURIComponent(item.href).replace(/^(\.\/)+/, '');
+        order.push(hp);
+        spineFiles.push({ path: hp, media: item.media || '' });
       }
     }
   }
@@ -2965,10 +3088,12 @@ async function extractEpubFromZip(zip) {
     const text = stripHtmlToText(html);
     if (text) parts.push(text);
   }
+  toc = await readEpubToc(zip, dir, manifest);
   return {
     text: parts.join('\n\n'),
     title: stripHtmlToText(metaTitle).trim(),
-    author: stripHtmlToText(metaAuthor).trim()
+    author: stripHtmlToText(metaAuthor).trim(),
+    order, toc, zip, hasSpine: spineFiles.length > 0
   };
 }
 

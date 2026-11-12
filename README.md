@@ -61,7 +61,7 @@
 |---|---|---|
 | TXT / Markdown | ✅ | 自动按空行与“第 X 章”标题切分章节；TXT 自动识别 UTF-8 / UTF-16 / GBK 编码 |
 | HTML / HTM | ✅ | 自动剥离标签、提取正文 |
-| EPUB | ✅ | 内置原生 ZIP 解压 + 读取 OPF 的 spine 顺序，按真实章节结构导入 |
+| EPUB | ✅ | 内置原生 ZIP 解压；**按书自带的目录（NCX / EPUB3 nav）分章并沿用目录标题**，同一章下的多个小文件自动合并，不会再出现"一页一个目录标题"；没有目录的书才退回按 spine 顺序分章 |
 | DOCX | ✅ | 读取 `word/document.xml` 正文段落 |
 | PPTX / XLSX / ODT / ODP / ODS | ✅ | 分别按幻灯片、工作表、ODF 正文提取文本 |
 | CBZ | ✅ | 漫画压缩包，逐页图片浏览 |

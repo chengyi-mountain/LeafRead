@@ -2765,6 +2765,8 @@ async function parsePdfBook(file) {
   }
 
   // 默认：原页阅读，每页一章
+  // 导入完成就在后台把排版引擎拉下来，用户点进书时就不用干等 10 MB
+  setTimeout(() => { loadMuPdf().catch(() => { }); }, 0);
   const chapters = [];
   for (let i = 1; i <= n; i++) chapters.push({ title: '第 ' + i + ' 页', body: '', pdfPage: i });
   return {

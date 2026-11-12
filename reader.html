@@ -334,6 +334,31 @@ input, textarea, select { font:inherit; color:inherit; }
 
 .shelf-section-title { font-size:13px; font-weight:600; color:var(--text-sub); margin: 20px 4px 10px; text-transform:uppercase; letter-spacing:.5px; }
 
+/* ===== 主页特色区：四卷《毛泽东选集》 ===== */
+.shelf-featured {
+  margin: 2px 0 20px; padding: 14px 14px 15px;
+  border-radius: var(--radius); background: var(--bg-elev);
+  border: 1px solid var(--border); box-shadow: var(--shadow);
+}
+.shelf-featured .featured-head { display:flex; align-items:flex-end; justify-content:space-between; gap:10px; margin-bottom:12px; }
+.shelf-featured .featured-title { font-size:15px; font-weight:700; letter-spacing:.01em; }
+.shelf-featured .featured-title span { font-size:11px; font-weight:400; color:var(--text-muted); margin-left:8px; }
+.shelf-featured .featured-row { display:grid; grid-template-columns:repeat(4, 1fr); gap:12px; }
+.shelf-featured .featured-card .book-cover { box-shadow:0 6px 18px rgba(0,0,0,.16); }
+.shelf-featured .featured-card .book-name { font-size:12.5px; font-weight:600; text-align:center; line-height:1.35; }
+.shelf-featured .featured-card .book-author { font-size:10.5px; }
+@media (max-width:560px) {
+  .shelf-featured .featured-row { grid-template-columns:repeat(2, 1fr); gap:14px 16px; }
+}
+/* 真实封面图（PDF 内嵌书用） */
+.book-cover.img-cover { padding:0; display:block; background:var(--bg-elev); }
+.book-cover.img-cover img { width:100%; height:100%; object-fit:cover; display:block; border-radius:8px; }
+.book-cover.img-cover::after {
+  content:''; position:absolute; inset:0; border-radius:8px;
+  box-shadow:inset 0 0 0 1px rgba(0,0,0,.06); pointer-events:none;
+}
+[data-theme="eink"] .book-cover.img-cover img { filter:grayscale(1) contrast(1.06); }
+
 .book-grid {
   display:grid;
   grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
@@ -1040,6 +1065,12 @@ mark { background:var(--accent); color:#fff; padding:0 2px; border-radius:2px; }
       </div>
       <div class="category-bar" id="categoryBar"></div>
       <div class="shelf-result-info" id="shelfResultInfo"></div>
+      <div class="shelf-featured" id="shelfFeatured" style="display:none">
+        <div class="featured-head">
+          <div class="featured-title">毛泽东选集<span>四卷全 · 1991 年版 · 原页影印</span></div>
+        </div>
+        <div class="featured-row" id="featuredRow"></div>
+      </div>
       <div class="shelf-section-title" id="builtinSectionTitle">内置书籍</div>
       <div class="book-grid" id="builtinGrid"></div>
       <div class="shelf-section-title" id="importedSectionTitle" style="display:none">已导入书籍</div>
@@ -1272,12 +1303,28 @@ function saveState() {
   } catch(e) { console.warn('saveState error', e); }
 }
 
+/* ===== 内置四卷《毛泽东选集》（1991 年版，文字层 PDF，按卷下载、原页阅读） ===== */
+const MAO_BUILTIN = [
+  { id: 'mao1', title: '毛泽东选集 第一卷', author: '毛泽东', category: '经典', lang: 'zh', format: 'PDF',
+    featured: true, coverUrl: 'books/covers/mao1.jpg', pdfSrc: 'books/mao1.pdf', pageCount: 352,
+    chapters: [], note: '原页影印 · 共 352 页' },
+  { id: 'mao2', title: '毛泽东选集 第二卷', author: '毛泽东', category: '经典', lang: 'zh', format: 'PDF',
+    featured: true, coverUrl: 'books/covers/mao2.jpg', pdfSrc: 'books/mao2.pdf', pageCount: 458,
+    chapters: [], note: '原页影印 · 共 458 页' },
+  { id: 'mao3', title: '毛泽东选集 第三卷', author: '毛泽东', category: '经典', lang: 'zh', format: 'PDF',
+    featured: true, coverUrl: 'books/covers/mao3.jpg', pdfSrc: 'books/mao3.pdf', pageCount: 342,
+    chapters: [], note: '原页影印 · 共 342 页' },
+  { id: 'mao4', title: '毛泽东选集 第四卷', author: '毛泽东', category: '经典', lang: 'zh', format: 'PDF',
+    featured: true, coverUrl: 'books/covers/mao4.jpg', pdfSrc: 'books/mao4.pdf', pageCount: 407,
+    chapters: [], note: '原页影印 · 共 407 页' },
+];
+
 // Initialize books: built-in + imported
 function initBooks() {
   try {
     state.books = [];
     const imported = JSON.parse(localStorage.getItem('reader_imported_books_v2') || '[]');
-    const builtin = window.__BUILTIN_BOOKS__ || [];
+    const builtin = [...MAO_BUILTIN, ...(window.__BUILTIN_BOOKS__ || [])];
     // Mark imported
     builtin.forEach(b => { b.imported = false; });
     imported.forEach(b => { b.imported = true; });
@@ -1316,6 +1363,9 @@ function setProgress(bookId, data) {
 
 // Book cover SVG/HTML
 function bookCoverHTML(book) {
+  if (book.coverUrl) {
+    return `<div class="book-cover img-cover"><img src="${escapeHtml(book.coverUrl)}" alt="${escapeHtml(book.title)}" loading="lazy" decoding="async"></div>`;
+  }
   const cls = coverClass(book);
   const cat = normalizeCategory(book.category || guessCategory(book));
   const meta = getCategoryMeta(cat);
@@ -1425,7 +1475,26 @@ function renderBookshelf() {
   const builtin = builtinAll.filter(b => (catFilter === '全部' || normalizeCategory(b.category) === catFilter) && bookMatchesQuery(b, q));
   const imported = importedAll.filter(b => (catFilter === '全部' || normalizeCategory(b.category) === catFilter) && bookMatchesQuery(b, q));
 
-  builtin.forEach(book => builtinGrid.appendChild(bookCard(book)));
+  // 主页顶部：四卷《毛泽东选集》单独成块，大封面突出展示（搜索/筛选/列表视图时收起）
+  const featuredBox = document.getElementById('shelfFeatured');
+  const featuredRow = document.getElementById('featuredRow');
+  const listModeNow = state.settings.shelfView === 'list';
+  const feat = builtinAll.filter(b => b.featured && (catFilter === '全部' || normalizeCategory(b.category) === catFilter));
+  const featShown = !!(featuredBox && featuredRow && feat.length && !isFiltering && !listModeNow);
+  if (featuredBox && featuredRow) {
+    featuredRow.innerHTML = '';
+    featuredBox.style.display = featShown ? '' : 'none';
+    if (featShown) feat.forEach(b => {
+      const card = bookCard(b);
+      card.classList.add('featured-card');
+      featuredRow.appendChild(card);
+    });
+  }
+
+  builtin.forEach(book => {
+    if (featShown && book.featured) return;  // 已在特色区展示，避免重复
+    builtinGrid.appendChild(bookCard(book));
+  });
 
   if (imported.length) {
     importedSection.style.display = '';
@@ -1629,7 +1698,61 @@ function loadLazyBook(book) {
 }
 
 // Open a book
+/* 内置 PDF：第一次打开时把 books/*.pdf 拉下来，之后同一次会话里复用 */
+const pdfSourceLoading = {};
+function loadPdfSourceBook(book) {
+  if (book.pdfBlob && book.chapters && book.chapters.length) return Promise.resolve(book);
+  if (pdfSourceLoading[book.id]) return pdfSourceLoading[book.id];
+  const total = book.pageCount || 0;
+  showLazyHint(book.title);
+  const setHint = txt => {
+    const el = document.getElementById('lazyHintTitle');
+    if (el) el.textContent = txt;
+  };
+  pdfSourceLoading[book.id] = (async () => {
+    const res = await fetch(book.pdfSrc, { cache: 'force-cache' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const len = Number(res.headers.get('content-length')) || 0;
+    const chunks = [];
+    let got = 0;
+    if (res.body && res.body.getReader) {
+      const reader = res.body.getReader();
+      for (;;) {
+        const step = await reader.read();
+        if (step.done) break;
+        chunks.push(step.value);
+        got += step.value.length;
+        setHint(len ? ('正在下载《' + book.title + '》 ' + Math.min(100, Math.round(got / len * 100)) + '%')
+                    : ('正在下载《' + book.title + '》 ' + Math.round(got / 1024) + ' KB'));
+      }
+    } else {
+      chunks.push(new Uint8Array(await res.arrayBuffer()));
+    }
+    const blob = new Blob(chunks, { type: 'application/pdf' });
+    const chapters = [];
+    for (let i = 1; i <= total; i++) chapters.push({ title: '第 ' + i + ' 页', body: '', pdfPage: i });
+    book.pdfBlob = blob;
+    book.chapters = chapters;
+    book.pdfMode = 'pages';
+    book.hasTextLayer = true;
+    book.note = '原页影印 · 共 ' + total + ' 页（含文字层，可切文字模式）';
+    hideLazyHint();
+    loadMuPdf().catch(() => {});
+    return book;
+  })().catch(err => {
+    hideLazyHint();
+    delete pdfSourceLoading[book.id];
+    toast('《' + book.title + '》下载失败（' + (err && err.message ? err.message : '网络错误') + '），请连网后重试', 'error', 4000);
+    throw err;
+  });
+  return pdfSourceLoading[book.id];
+}
+
 function openBook(book) {
+  if (book.pdfSrc && !book.pdfBlob) {
+    loadPdfSourceBook(book).then(() => openBookNow(book)).catch(() => {});
+    return;
+  }
   if (book.lazy && !(book.chapters && book.chapters.length)) {
     loadLazyBook(book).then(() => openBookNow(book)).catch(() => {});
     return;

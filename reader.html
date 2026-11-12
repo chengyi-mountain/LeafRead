@@ -83,21 +83,76 @@
   --border: rgba(42,107,138,0.1);
   --border-strong: rgba(42,107,138,0.2);
 }
-/* ===== E-ink 水墨屏 ===== */
+/* ===== E-ink 水墨屏：灰绿纸底 + 墨色字 + 微颗粒纸纹，刻意压低对比，不发光 ===== */
 [data-theme="eink"] {
-  --bg: #f0ede6;
-  --bg-elev: #f7f5f0;
-  --bg-overlay: rgba(247,245,240,0.96);
-  --text: #1a1a1a;
-  --text-sub: #4a4a4a;
-  --text-muted: #7a7a7a;
-  --accent: #2b2b2b;
-  --accent-light: #4a4a4a;
-  --border: rgba(0,0,0,0.1);
-  --border-strong: rgba(0,0,0,0.2);
+  --bg: #e0e2d7;
+  --bg-elev: #e6e8dd;
+  --bg-overlay: rgba(230,232,221,0.96);
+  --text: #33372f;
+  --text-sub: #565a4d;
+  --text-muted: #868b7c;
+  --accent: #4a5044;
+  --accent-light: #6b7161;
+  --border: rgba(50,55,46,0.16);
+  --border-strong: rgba(50,55,46,0.34);
   --shadow: none;
   --shadow-lg: none;
 }
+/* 纸纹：细颗粒噪点（SVG 湍流，内联无外链）+ 顶部柔光、底部轻微压暗，模拟反射光的纸面 */
+[data-theme="eink"] body {
+  background-color: #e0e2d7;
+  background-image:
+    radial-gradient(140% 80% at 50% -12%, rgba(255,255,255,0.16), rgba(255,255,255,0) 58%),
+    radial-gradient(130% 70% at 50% 112%, rgba(48,52,44,0.12), rgba(48,52,44,0) 62%),
+    url("data:image/svg+xml;charset=utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='g'><feTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/><feColorMatrix type='saturate' values='0'/></filter><rect width='180' height='180' filter='url(%23g)' opacity='0.05'/></svg>");
+  background-repeat: no-repeat, no-repeat, repeat;
+  background-size: cover, cover, 180px 180px;
+}
+/* 阅读区就是纸面本身，不叠白色卡片 */
+[data-theme="eink"] .reader-content,
+[data-theme="eink"] .reader-inner,
+[data-theme="eink"] .page-canvas { background: transparent; }
+/* 墨字：略灰、笔画不刺眼 */
+[data-theme="eink"] .reader-inner,
+[data-theme="eink"] .page-canvas { color: #33372f; }
+[data-theme="eink"] .reader-inner h2.chapter-title {
+  color: #2c3028;
+  letter-spacing: 0.04em;
+  font-weight: 600;
+}
+[data-theme="eink"] .reader-inner .chapter-title::after {
+  content: "";
+  display: block; width: 46px; height: 1px; margin: 12px auto 0;
+  background: rgba(50,55,46,0.35);
+}
+/* 水墨屏只有灰阶：封面褪成灰绿但保留可读性 */
+[data-theme="eink"] .book-cover,
+[data-theme="eink"] .comic-page img,
+[data-theme="eink"] .reader-inner img { filter: grayscale(1) contrast(0.9) brightness(1.22); }
+[data-theme="eink"] .book-cover { box-shadow: 0 2px 8px rgba(40,44,36,0.10); }
+[data-theme="eink"] .book-cover .cover-title,
+[data-theme="eink"] .book-cover .cover-author,
+[data-theme="eink"] .book-cover .cover-top { color: #f2f3ea !important; }
+[data-theme="eink"] .book-cover .cover-title { text-shadow: 0 1px 1px rgba(0,0,0,0.35); }
+/* 侧栏、卡片：细线代替投影 */
+[data-theme="eink"] .sidebar,
+[data-theme="eink"] .book-grid.list-view .book-card,
+[data-theme="eink"] .shelf-ext-btn,
+[data-theme="eink"] .import-option {
+  box-shadow: none !important;
+  border: 1px solid var(--border);
+}
+[data-theme="eink"] .sidebar { border-left: 1px solid var(--border-strong); }
+[data-theme="eink"] .topbar { border-bottom: 1px solid var(--border); }
+/* 选中态用石墨色描边，不用发光 */
+[data-theme="eink"] .swatch.active { box-shadow: 0 0 0 2px #e0e2d7, 0 0 0 3.5px #4a5044; }
+[data-theme="eink"] .mode-tab.active,
+[data-theme="eink"] .font-opt.active { background: #3f4539; color: #eceee4; }
+[data-theme="eink"] .reset-btn {
+  background: #dcdfd3; border: 1px solid var(--border-strong);
+  outline: none; box-shadow: none;
+}
+[data-theme="eink"] .reset-btn:focus { outline: none; }
 
 * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
 html, body { height:100%; overflow:hidden; }
@@ -1123,7 +1178,7 @@ const THEMES = [
   {id:'eye', name:'护眼', bg:'#c8e6c0'},
   {id:'forest', name:'森林', bg:'#eef3ec'},
   {id:'ocean', name:'海洋', bg:'#e8f0f5'},
-  {id:'eink', name:'水墨', bg:'#f0ede6'},
+  {id:'eink', name:'水墨', bg:'#e0e2d7'},
 ];
 const FONTS = [
   {id:'serif', name:'衬线', css:'var(--font-serif)'},

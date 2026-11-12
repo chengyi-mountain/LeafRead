@@ -751,14 +751,28 @@ mark { background:var(--accent); color:#fff; padding:0 2px; border-radius:2px; }
 }
 .tts-text.show { display:block; }
 .tts-current {
-  background:var(--tts-hl, rgba(139,111,71,.15));
-  border-radius:3px;
-  box-shadow:inset 3px 0 0 var(--tts-hl-bar, rgba(139,111,71,.5));
+  background:transparent;
   transition:background .2s;
   cursor:grab;
   -webkit-user-select:none; user-select:none;
 }
+/* 逐句高亮（Chrome/Edge/安卓 Chrome 支持）：只给正在读的这一句上底色 */
+::highlight(tts-read) {
+  background-color: var(--tts-hl, rgba(139,111,71,.15));
+  color: inherit;
+}
+.tts-current-fallback {
+  background:var(--tts-hl, rgba(139,111,71,.15));
+  border-radius:3px;
+  box-shadow:inset 3px 0 0 var(--tts-hl-bar, rgba(139,111,71,.5));
+}
+#ttsHlBox {
+  position:fixed; z-index:10; pointer-events:none; display:none;
+  background:var(--tts-hl, rgba(139,111,71,.15)); border-radius:3px;
+}
 .tts-current.tts-dragging { cursor:grabbing; background:rgba(139,111,71,.26); }
+/* 朗读时播放条压住底部：给正文留出空间，最后几句也能滚到条上面 */
+body.tts-on .reader-content { padding-bottom: max(132px, calc(var(--safe-bottom) + 96px)); }
 /* 拖动朗读起点：落在哪一段就框住哪一段 */
 #readerInner .tts-drag-target {
   outline:2px dashed rgba(139,111,71,.75);
@@ -1305,6 +1319,7 @@ mark { background:var(--accent); color:#fff; padding:0 2px; border-radius:2px; }
   </button>
 </div>
 <div id="ttsDropHint">松手：从这里开始读</div>
+<div id="ttsHlBox"></div>
 
 <!-- Tooltip -->
 <div class="word-tip" id="wordTip">
@@ -4853,6 +4868,7 @@ function renderPage(pageIdx, animate) {
   if (!pageMeasurer || pageMeasurer.chapter !== state.currentChapter || !canvas.firstChild) {
     pageMeasurer = { chapter: state.currentChapter, html: buildChapterHTML(state.currentChapter) };
     canvas.innerHTML = pageMeasurer.html;
+    try { if (window.CSS && CSS.highlights) CSS.highlights.delete('tts-read'); } catch (e) { }
   }
 
   const w = applyPageLayout();
@@ -5063,47 +5079,153 @@ function ttsParagraphs() {
   if (state.settings.mode === 'paged') return [...document.querySelectorAll('#pageCanvas p')];
   return [...document.querySelectorAll('#readerInner .chapter-body p')];
 }
-function ttsSyncPagedView() {
+/* 逐句高亮：用 CSS Custom Highlight 只给「正在读的这一句」上底色，
+   不再整段铺色（一整段经常占满一页，看着就像整张都亮了）。 */
+function ttsClearHighlight() {
+  try { if (window.CSS && CSS.highlights) CSS.highlights.delete('tts-read'); } catch (e) { }
+  document.querySelectorAll('.tts-current, .tts-current-fallback').forEach(el => {
+    el.classList.remove('tts-current', 'tts-current-fallback');
+  });
+  state.tts.hlEl = null;
+  state.tts.hlRange = null;
+  ttsPaintOverlay(null);
+}
+/* 浏览器不支持 Custom Highlight 时的兜底：用一个不可点的色块盖在「这一句」的位置上
+   —— 仍然只亮一句，不会像整段铺色那样把一页都罩住 */
+function ttsPaintOverlay(range) {
+  const box = document.getElementById('ttsHlBox');
+  if (!box) return;
+  if (!range || !range.getClientRects || !range.getClientRects().length) {
+    box.style.display = 'none';
+    return;
+  }
+  const r = range.getBoundingClientRect();
+  if (!r.width && !r.height) { box.style.display = 'none'; return; }
+  box.style.display = 'block';
+  box.style.left = r.left + 'px';
+  box.style.top = r.top + 'px';
+  box.style.width = r.width + 'px';
+  box.style.height = r.height + 'px';
+}
+/* 兜底色块跟着页面滚动/翻页重新定位 */
+(function () {
+  const follow = () => {
+    const box = document.getElementById('ttsHlBox');
+    if (box && box.style.display === 'block' && state.tts && state.tts.hlRange) ttsPaintOverlay(state.tts.hlRange);
+  };
+  const c = document.getElementById('readerContent');
+  if (c) c.addEventListener('scroll', follow, { passive: true });
+  window.addEventListener('resize', follow);
+})();
+function ttsRangeForText(para, text) {
+  const needle = String(text || '').replace(/\s+/g, '');
+  if (!para || !needle) return null;
+  // 把段落的文字节点按「去掉空白」的顺序记下来，便于把句子对上字符位置
+  const nodes = [], map = [];
+  let flat = '';
+  const walker = document.createTreeWalker(para, NodeFilter.SHOW_TEXT, null);
+  let n;
+  while ((n = walker.nextNode())) {
+    const s = n.nodeValue || '';
+    for (let i = 0; i < s.length; i++) {
+      if (/\s/.test(s[i])) continue;
+      map.push({ node: n, off: i });
+      flat += s[i];
+    }
+    nodes.push(n);
+  }
+  let at = flat.indexOf(needle.slice(0, Math.min(14, needle.length)));
+  if (at < 0) at = flat.indexOf(needle.slice(0, 6));
+  if (at < 0) at = flat.indexOf(needle.slice(0, 3));
+  if (at < 0) return null;
+  const s = map[at];
+  const e = map[Math.min(flat.length - 1, at + needle.length - 1)];
+  if (!s || !e) return null;
+  try {
+    const r = document.createRange();
+    r.setStart(s.node, s.off);
+    r.setEnd(e.node, e.off + 1);
+    return r;
+  } catch (err) { return null; }
+}
+function ttsSyncPagedView(rect) {
   if (state.settings.mode !== 'paged') return;
-  const cur = document.querySelector('#pageCanvas .tts-current');
-  if (!cur) return;
+  const canvas = document.getElementById('pageCanvas');
+  if (!canvas) return;
+  let target = rect;
+  if (!target) {
+    const cur = document.querySelector('#pageCanvas .tts-current');
+    if (!cur) return;
+    target = cur.getBoundingClientRect();
+  }
   const stride = pageLayoutMetrics().stride || 1;
-  const page = Math.max(0, Math.floor((cur.offsetLeft + 4) / stride));
-  if (page !== (state.pageIndex || 0)) renderPage(page, true);
+  const cr = canvas.getBoundingClientRect();
+  // canvas 已经按 -pageIndex*stride 平移：算出来的就是绝对栏号
+  const page = Math.max(0, Math.round((target.left - cr.left) / stride));
+  if (page !== (state.pageIndex || 0) && page < (state.totalPages || 1)) renderPage(page, true);
+}
+/* 滚动模式：只在这一句快要跑出可视区时才滚，平时不动，避免一直抖 */
+function ttsScrollToRect(rect) {
+  const content = document.getElementById('readerContent');
+  if (!content || !rect) return;
+  const box = content.getBoundingClientRect();
+  const topLimit = box.top + 90, bottomLimit = box.bottom - 170;
+  if (rect.top >= topLimit && rect.bottom <= bottomLimit) return;
+  const target = content.scrollTop + (rect.top - box.top) - content.clientHeight * 0.36;
+  try { content.scrollTo({ top: Math.max(0, target), behavior: 'smooth' }); } catch (e) { content.scrollTop = target; }
+}
+/* 句子 -> 段落：按累积字数对齐。句子和段落都是同一段正文切出来的，
+   字数能对上就不会出现「第2段的句子匹配到第1段」这种错位（之前关键词匹配就会）。 */
+function ttsParaForSentence(idx) {
+  const paras = ttsParagraphs();
+  const sents = state.tts.sentences || [];
+  if (!paras.length || !sents.length || idx < 0) return null;
+  const flat = s => String(s || '').replace(/\s+/g, '');
+  let acc = 0;
+  for (let i = 0; i < idx && i < sents.length; i++) acc += flat(sents[i]).length;
+  let pc = 0;
+  for (let k = 0; k < paras.length; k++) {
+    const pl = flat(paras[k].textContent).length;
+    if (acc < pc + pl) return paras[k];
+    pc += pl;
+  }
+  return paras[paras.length - 1] || null;
 }
 function ttsHighlight(sentence, paraEl) {
   ttsWriteSpeed(sentence);
   const paras = ttsParagraphs();
   if (!paras.length) return;
-  let hit = paraEl || null;
-  const flat = String(sentence || '').replace(/\s+/g, '');
-  if (!hit && flat) {
-    // 从当前所在段往后找（读长章节时不会一直跳回前面重复的短句）
+  let hit = (paraEl && paras.indexOf(paraEl) >= 0) ? paraEl : ttsParaForSentence(state.tts.currentIndex);
+  let range = ttsRangeForText(hit, sentence);
+  if (!range) {
+    // 字数没对上（标题被剔除、章节被改写过等）：在整章里找能定位到这一句的那一段
+    const flat = String(sentence || '').replace(/\s+/g, '');
     const start = Math.max(0, Math.min(paras.length - 1, state.tts.paraIdx || 0));
-    const tryHit = p => {
-      const t = p.textContent.replace(/\s+/g, '');
-      if (t.length >= 4 && flat.indexOf(t.slice(0, 6)) >= 0) return true;
-      if (flat.length < 4) return false;
-      return [0, 4, 8].map(off => flat.slice(off, off + 12)).filter(s => s.length >= 4).some(c => t.indexOf(c) >= 0);
-    };
-    for (let k = 0; k < paras.length && !hit; k++) {
+    for (let k = 0; k < paras.length && !range; k++) {
       const p = paras[(start + k) % paras.length];
-      if (tryHit(p)) hit = p;
+      const r = ttsRangeForText(p, sentence);
+      if (r) { hit = p; range = r; }
     }
   }
   if (!hit) return;
-  const changed = hit !== state.tts.hlEl;
-  if (changed) {
-    document.querySelectorAll('.tts-current').forEach(el => el.classList.remove('tts-current'));
-    hit.classList.add('tts-current');
-    state.tts.hlEl = hit;
-  }
   const at = paras.indexOf(hit);
   if (at >= 0) state.tts.paraIdx = at;
-  if (changed) {
-    if (state.settings.mode === 'paged') ttsSyncPagedView();
-    else { try { hit.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) { } }
+
+  ttsClearHighlight();
+  hit.classList.add('tts-current');           // 只用来给「拖动换起点」留抓取点，不再铺满底色
+  state.tts.hlEl = hit;
+  let native = false;
+  if (range && window.CSS && CSS.highlights && window.Highlight) {
+    try { CSS.highlights.set('tts-read', new Highlight(range)); native = true; state.tts.hlRange = range; } catch (e) { }
   }
+  if (!native) {
+    // 不支持 Custom Highlight：色块兜底（只盖住这一句），不再整段铺色
+    ttsPaintOverlay(range);
+  }
+  const rect = range ? range.getBoundingClientRect() : hit.getBoundingClientRect();
+  if (!rect || (!rect.width && !rect.height)) return;
+  if (state.settings.mode === 'paged') ttsSyncPagedView(rect);
+  else ttsScrollToRect(rect);
 }
 function ttsReadableText(ch) {
   if (!ch) return '';
@@ -5189,8 +5311,7 @@ function ttsSyncMediaSession() {
         album: 'LeafRead 朗读'
       });
     }
-    navigator.mediaSession.playbackState = state.tts.active ? (state.tts.paused ? 'paused' : 'playing') : 'none';
-    const set = (act, fn) => { try { navigator.mediaSession.setActionHandler(act, fn); } catch (e) { } };
+    navigator.mediaSession.playbackState = state.tts.active ? (state.tts.paused ? 'paused' : 'playing') : 'none';    const set = (act, fn) => { try { navigator.mediaSession.setActionHandler(act, fn); } catch (e) { } };
     set('play', () => { if (state.tts.active) resumeTTS(); else startTTS(); });
     set('pause', () => pauseTTS());
     set('stop', () => stopTTS());
@@ -5263,6 +5384,7 @@ function startTTS() {
   state.tts.lastSpeakAt = 0;
   state.tts.gen = (state.tts.gen || 0) + 1;
   document.getElementById('ttsBar').classList.add('show');
+  document.body.classList.add('tts-on');
   document.getElementById('ttsBook').textContent = book.title;
   document.getElementById('ttsChapter').textContent = ch.title || '';
   ttsSyncRateBtn();
@@ -5351,10 +5473,12 @@ function stopTTS() {
   if (state.tts.watch) { clearInterval(state.tts.watch); state.tts.watch = null; }
   try { speechSynthesis.cancel(); } catch (e) { }
   document.getElementById('ttsBar').classList.remove('show');
+  document.body.classList.remove('tts-on');
   const bar = document.getElementById('ttsText');
   if (bar) { bar.classList.remove('show'); bar.textContent = ''; }
   document.querySelectorAll('.tts-current').forEach(el => el.classList.remove('tts-current'));
   state.tts.hlEl = null;
+  try { if (window.CSS && CSS.highlights) CSS.highlights.delete('tts-read'); } catch (e) { }
   state.tts.sleepAt = 0;
   ttsKeepAliveStop();
 }

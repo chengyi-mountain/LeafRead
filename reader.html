@@ -863,6 +863,11 @@ mark { background:var(--accent); color:#fff; padding:0 2px; border-radius:2px; }
 /* ===== Comic / image pages ===== */
 .comic-page { text-align:center; margin: 12px 0; }
 #readerContent.pdf-narrow { padding-left:10px; padding-right:10px; }
+/* 站点页脚：澄一 印章标识 */
+.site-footer { text-align:center; padding:26px 16px 42px; }
+.site-footer img { width:44px; height:44px; display:block; margin:0 auto 9px; opacity:.92; }
+.site-footer-name { display:block; font-size:13px; letter-spacing:.24em; color:var(--text-sub); font-weight:600; }
+.site-footer-sub { display:block; margin-top:6px; font-size:11px; color:var(--text-muted); letter-spacing:.06em; }
 .pdf-page-wrap { text-align:center; margin: 8px 0 24px; overflow-x:auto; overflow-y:visible; -webkit-overflow-scrolling:touch; }
 .pdf-page-wrap canvas { max-width:none; height:auto; display:block; margin:0 auto;
   border-radius:4px; box-shadow:0 4px 18px rgba(0,0,0,.14); background:#fff; }
@@ -1145,6 +1150,11 @@ mark { background:var(--accent); color:#fff; padding:0 2px; border-radius:2px; }
         <div class="shelf-empty-text">没有找到匹配的书籍</div>
         <div class="shelf-empty-sub">试试其他关键词，或清除筛选条件</div>
         <div class="shelf-ext-links" id="shelfExtLinks"></div>
+      </div>
+      <div class="site-footer">
+        <img src="assets/logo-chengyi.png" alt="澄一" width="44" height="44">
+        <span class="site-footer-name">澄一</span>
+        <span class="site-footer-sub">LeafRead · 自建阅读器</span>
       </div>
     </div>
   </main>

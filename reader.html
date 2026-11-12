@@ -464,7 +464,7 @@ input, textarea, select { font:inherit; color:inherit; }
 .reader { height:100%; display:flex; flex-direction:column; position:relative; }
 .reader-content {
   flex:1; overflow-y:auto; overflow-x:hidden;
-  padding: 0 20px;
+  padding: 0 30px;
   padding-top: max(16px, var(--safe-top));
   padding-bottom: max(60px, var(--safe-bottom));
   scroll-behavior: smooth;
@@ -483,10 +483,11 @@ input, textarea, select { font:inherit; color:inherit; }
   line-height: var(--reader-line, 1.9);
   letter-spacing: var(--reader-space, 0.02em);
   color: var(--text);
-  padding: 0 4px;
+  padding: 0 8px;
 }
 .reader-inner p {
   text-indent: 2em;
+  overflow-wrap: break-word;
   margin-bottom: calc(var(--reader-size, 18px) * var(--reader-line, 1.9) * 0.6);
 }
 .reader-inner h2.chapter-title {
@@ -516,7 +517,7 @@ input, textarea, select { font:inherit; color:inherit; }
   line-height: var(--reader-line, 1.9);
   letter-spacing: var(--reader-space, 0.02em);
   color: var(--text);
-  padding: 0 4px;
+  padding: 0 8px;
 }
 .page-canvas p { text-indent:2em; margin:0; }
 .page-canvas h2 { font-size: calc(var(--reader-size, 18px) * 1.4); font-weight:700; text-align:center; margin-bottom: .8em; }
@@ -888,7 +889,7 @@ mark { background:var(--accent); color:#fff; padding:0 2px; border-radius:2px; }
   .topbar { padding: 8px 10px; gap:4px; }
   .icon-btn { width:40px; height:40px; }
   .sidebar { width:85vw; }
-  .reader-content { padding:0 16px; }
+  .reader-content { padding:0 26px; }
   .reader-inner { font-size:var(--reader-size, 17px); }
   .reader-bottom-bar .rb-center { display:none; }
 }
@@ -1328,6 +1329,7 @@ const state = {
     animType: 'slide',
     pageShadow: true,
     pdfTextMode: false,
+    pdfMupdf: false,
     warmLight: 0,
     flipSound: true,
     shelfView: 'grid',
@@ -1805,6 +1807,7 @@ function loadPdfSourceBook(book) {
     book.chapters = chapters;
     book.pdfMode = 'pages';
     book.hasTextLayer = true;
+    book.renderer = 'mupdf';   // 毛选系列的字体名是 GBK 字节，只有 MuPDF 画得对
     book.note = '原页影印 · 共 ' + total + ' 页（含文字层，可切文字模式）';
     hideLazyHint();
     loadMuPdf().catch(() => {});
@@ -2214,6 +2217,10 @@ function renderSettings(body) {
         <label>PDF 按文字阅读</label>
         <div class="toggle ${s.pdfTextMode?'on':''}" id="togglePdfText"></div>
       </div>
+      <div class="setting-row" id="pdfMupdfRow">
+        <label>老 PDF 兼容引擎</label>
+        <div class="toggle ${s.pdfMupdf?'on':''}" id="togglePdfMupdf"></div>
+      </div>
     </div>
       <div class="settings-group">
       <div class="settings-group-title">朗读</div>
@@ -2286,6 +2293,11 @@ function renderSettings(body) {
   body.querySelector('#toggleShadow').onclick = function() { s.pageShadow = !s.pageShadow; saveState(); renderSettings(body); };
   body.querySelector('#togglePdfText').onclick = function() {
     s.pdfTextMode = !s.pdfTextMode; applySettings(); saveState(); renderSettings(body);
+  };
+  body.querySelector('#togglePdfMupdf').onclick = function() {
+    s.pdfMupdf = !s.pdfMupdf; saveState(); renderSettings(body);
+    toast(s.pdfMupdf ? 'PDF 改用兼容引擎（老中文 PDF 显示乱码时打开它）' : 'PDF 引擎已回到自动', 'success');
+    if (state.currentBook && state.currentBook.pdfMode === 'pages') renderChapter(state.currentChapter, false);
   };
   body.querySelector('#toggleSound').onclick = function() { s.flipSound = !s.flipSound; saveState(); renderSettings(body); };
   body.querySelector('#setWarm').oninput = e => { s.warmLight = +e.target.value; document.getElementById('valWarm').textContent = Math.round(e.target.value*100)+'%'; applySettings(); };
@@ -2946,6 +2958,12 @@ const mupdfDocCache = {};
 
 let muPdfWarmPromise = null;
 
+/* 页面上的状态行（会被渲染流程反复覆盖，所以只在本帧有 .pdf-page-status 时写） */
+function pdfStatusHTML(html) {
+  const st = document.querySelector('.pdf-page-status');
+  if (st) st.innerHTML = html;
+}
+
 /* 先自己下载 wasm，好在页面上显示百分比；下完浏览器已缓存，Emscripten 再取一次几乎瞬完 */
 function warmMuPdfWasm() {
   if (muPdfWarmPromise) return muPdfWarmPromise;
@@ -2962,33 +2980,86 @@ function warmMuPdfWasm() {
         if (chunk.done) break;
         got += chunk.value.length;
         const pct = total ? Math.min(100, Math.round(got / total * 100)) : 0;
-        const st = document.querySelector('.pdf-page-status');
-        if (st) st.innerHTML = '正在下载 PDF 排版引擎' + (pct ? ' ' + pct + '%' : '…') +
-          '<br>（首次约 4.6 MB，下完会缓存，以后打开不用再等）';
+        const size = total ? (total / 1048576).toFixed(1) + ' MB' : '十几 MB';
+        pdfStatusHTML('正在下载 PDF 兼容引擎' + (pct ? ' ' + pct + '%' : '…') +
+          '<br>（这本是老版中文 PDF，要用兼容引擎，首次约 ' + size + '，下完会缓存，以后不用再等）');
       }
+      // 下载完还要初始化，如实说明，别让人以为卡在 100%
+      pdfStatusHTML('兼容引擎下载完成，正在初始化…<br>（第一次要等十几秒，之后打开就快多了）');
     } catch (e) { /* 失败就交给 import 自己再取 */ }
   })();
   return muPdfWarmPromise;
 }
 
+/* 给 Promise 加个期限：真机上有时候 wasm 下到 100% 后初始化卡死，页面就永远停在 100% */
+function withDeadline(promise, ms, message) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms);
+    promise.then(v => { clearTimeout(timer); resolve(v); },
+                 e => { clearTimeout(timer); reject(e); });
+  });
+}
+
 function loadMuPdf() {
   if (window.__mupdfLib) return Promise.resolve(window.__mupdfLib);
   if (muPdfPromise) return muPdfPromise;
-  muPdfPromise = warmMuPdfWasm().then(() => import(new URL('mupdf/mupdf.js', document.baseURI).href)).then(async (mod) => {
-    const lib = mod;
-    if (lib && typeof lib.default === 'object' && lib.default && lib.default.Document) {
-      // 兼容 default 导出
-      window.__mupdfLib = lib.default;
-    } else {
-      window.__mupdfLib = lib;
-    }
-    // Emscripten 模块需要等 wasm 初始化
-    if (typeof window.__mupdfLib.setLogLevel === 'undefined' && window.__mupdfLib.mupdf) {
-      window.__mupdfLib = window.__mupdfLib.mupdf;
-    }
-    return window.__mupdfLib;
-  }).catch(err => { muPdfPromise = null; throw err; });
+  const raw = warmMuPdfWasm()
+    .then(() => import(new URL('mupdf/mupdf.js', document.baseURI).href))
+    .then(async (mod) => {
+      const lib = mod;
+      if (lib && typeof lib.default === 'object' && lib.default && lib.default.Document) {
+        // 兼容 default 导出
+        window.__mupdfLib = lib.default;
+      } else {
+        window.__mupdfLib = lib;
+      }
+      // Emscripten 模块需要等 wasm 初始化
+      if (typeof window.__mupdfLib.setLogLevel === 'undefined' && window.__mupdfLib.mupdf) {
+        window.__mupdfLib = window.__mupdfLib.mupdf;
+      }
+      return window.__mupdfLib;
+    });
+  muPdfPromise = withDeadline(raw, 90000, '兼容引擎初始化超时（这台手机可能不支持 Wasm，或网速太慢）')
+    .catch(err => { muPdfPromise = null; muPdfWarmPromise = null; throw err; });
   return muPdfPromise;
+}
+
+/* 这本书该用哪个引擎画原页：
+   老中文 PDF（字体名是 GBK 字节 / 文字层读不出正常中文）→ MuPDF，否则 pdf.js 会画成乱码；
+   其它一律 pdf.js —— 引擎 1.5 MB、矢量绘制，按屏幕真实像素画出来是清晰的，也不用等 10 MB 的 wasm。 */
+function guessPdfRenderer(bytes, sample, hasTextLayer) {
+  try {
+    if (!bytes || !bytes.length) return 'pdfjs';
+    const limit = Math.min(bytes.length, 3 * 1024 * 1024);
+    let latin = '';
+    for (let i = 0; i < limit; i += 0x8000) {
+      latin += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + 0x8000, limit)));
+    }
+    const nameRe = /\/BaseFont\s*\/([^\s\/\[\]<>(){}]+)/g;
+    let m, seen = 0;
+    while ((m = nameRe.exec(latin)) && seen < 60) {
+      seen++;
+      if (/[^\x00-\x7F]/.test(m[1])) return 'mupdf';
+    }
+    if (hasTextLayer && sample) {
+      const raw = String(sample);
+      // 一堆 Latin-1 范围字符、几乎没有汉字 → 多半是 GBK 字节被当成单字节塞进来的老 PDF
+      let latin1 = 0, cjk = 0;
+      for (let i = 0; i < raw.length; i++) {
+        const c = raw.charCodeAt(i);
+        if (c >= 0x00A0 && c <= 0x00FF) latin1++;
+        else if (c >= 0x4E00 && c <= 0x9FFF) cjk++;
+      }
+      if (latin1 > 40 && latin1 > cjk * 3) return 'mupdf';
+      if (textLooksGarbled(raw) && textLooksGarbled(fixPdfGbkText(raw))) return 'mupdf';
+    }
+    return 'pdfjs';
+  } catch (e) { return 'pdfjs'; }
+}
+
+function pdfRendererFor(book) {
+  if (state.settings && state.settings.pdfMupdf) return 'mupdf';
+  return book && book.renderer === 'mupdf' ? 'mupdf' : 'pdfjs';
 }
 
 function getMupdfDoc(book) {
@@ -3019,6 +3090,8 @@ function getPdfDoc(book) {
 async function parsePdfBook(file) {
   const lib = await loadPdfJs();
   const buf = await file.arrayBuffer();
+  // pdf.js 会把 buf transfer 给 worker（之后 buf 就废了），判定引擎要用的字节先留一份（只看前 3 MB 够用）
+  const rawBytes = new Uint8Array(buf.slice(0, Math.min(buf.byteLength, 3 * 1024 * 1024)));
   const doc = await lib.getDocument(pdfDocOptions(buf)).promise;
   const n = doc.numPages;
   const title = file.name.replace(/\.pdf$/i, '');
@@ -3034,6 +3107,8 @@ async function parsePdfBook(file) {
     } catch (e) { /* 单页失败不影响整体 */ }
   }
   const hasTextLayer = sample.replace(/[\s\u3000]/g, '').length > 80;
+  // 老中文 PDF 才用兼容引擎；常规 PDF 用 pdf.js（体积小、清晰、打开快）
+  const renderer = guessPdfRenderer(rawBytes, sample, hasTextLayer);
 
   // 用户主动选了"文字模式"：抽文字重排
   if (state.settings.pdfTextMode) {
@@ -3079,13 +3154,13 @@ async function parsePdfBook(file) {
   }
 
   // 默认：原页阅读，每页一章
-  // 导入完成就在后台把排版引擎拉下来，用户点进书时就不用干等 10 MB
-  setTimeout(() => { loadMuPdf().catch(() => { }); }, 0);
+  // 只有当这本书真的要用兼容引擎时，才在后台把它拉下来；常规 PDF 不碰那 10 MB
+  if (renderer === 'mupdf') setTimeout(() => { loadMuPdf().catch(() => { }); }, 0);
   const chapters = [];
   for (let i = 1; i <= n; i++) chapters.push({ title: '第 ' + i + ' 页', body: '', pdfPage: i });
   return {
     title, author: '佚名', cover: 'imported', format: 'pdf', lang: 'zh',
-    chapters, pdfMode: 'pages', pageCount: n, pdfBlob: file, hasTextLayer,
+    chapters, pdfMode: 'pages', pageCount: n, pdfBlob: file, hasTextLayer, renderer,
     note: 'PDF 原样阅读 · 共 ' + n + ' 页' + (hasTextLayer ? '（含文字层，可切文字模式）' : '（扫描版，逐页显示原图）'),
   };
 }
@@ -3099,11 +3174,33 @@ async function parseImageBook(file, name) {
 }
 
 /* 把某一页 PDF 渲染出来放进正文区 */
+function pdfPageAvail() {
+  const content = document.getElementById('readerContent');
+  let avail = Math.min((content.clientWidth || 420) - 8, (state.settings && state.settings.contentWidth) || 640);
+  if (avail < 220) avail = Math.min((window.innerWidth || 420) - 24, 640);
+  return avail;
+}
+
+/* 画布尺寸按屏幕真实像素来（最多 3 倍），再套一个像素预算，
+   这样 DPR 3 的手机上不会再被放大糊掉，也不会把内存画爆 */
+function pdfPageScaleFor(cssWidth, pageWidth, pageHeight) {
+  const dpr = Math.min(3, window.devicePixelRatio || 1);
+  let scale = (cssWidth / pageWidth) * dpr;
+  const budget = 4200000;
+  const px = (pageWidth * scale) * (pageHeight * scale);
+  if (px > budget) scale *= Math.sqrt(budget / px);
+  return scale;
+}
+
 function renderPdfPage(chIdx, ch) {
   const inner = document.getElementById('readerInner');
   const book = state.currentBook;
   const pageNo = ch.pdfPage;
-  inner.innerHTML = '<div class="pdf-page-wrap" id="pdfPageWrap"><div class="pdf-page-status">正在渲染第 ' + pageNo + ' 页…<br>（首次打开要先下载 PDF 排版引擎，稍等一下）</div></div>';
+  const engine = pdfRendererFor(book);
+  inner.innerHTML = '<div class="pdf-page-wrap" id="pdfPageWrap"><div class="pdf-page-status">' +
+    (engine === 'mupdf'
+      ? '正在准备第 ' + pageNo + ' 页…<br>（这本是老版中文 PDF，要用兼容引擎，第一次会慢一些）'
+      : '正在渲染第 ' + pageNo + ' 页…') + '</div></div>';
   document.getElementById('topbarBook').textContent = book.title || '';
   document.getElementById('topbarChapter').textContent = ch.title || ('第 ' + pageNo + ' 页');
   renderHighlightsForChapter(chIdx);
@@ -3122,67 +3219,71 @@ function renderPdfPage(chIdx, ch) {
     return true;
   };
 
-  getMupdfDoc(book).then(doc => {
-    if (state.currentChapter !== chIdx) return null;        // 用户已经翻走了
-    const page = doc.loadPage(pageNo - 1);
-    const b = page.getBounds();
-    const pw = b[2] - b[0];
-    const content = document.getElementById('readerContent');
-    let avail = Math.min((content.clientWidth || 420) - 8, state.settings.contentWidth || 640);
-    if (avail < 220) avail = Math.min((window.innerWidth || 420) - 16, 640);
-    const dpr = Math.min(2, window.devicePixelRatio || 1);
-    const zoom = (avail / pw) * dpr;
-    const lib = window.__mupdfLib;
-    const pix = page.toPixmap(lib.mupdf ? lib.mupdf.Matrix.scale(zoom, zoom) : lib.Matrix.scale(zoom, zoom),
-      lib.mupdf ? lib.mupdf.ColorSpace.DeviceRGB : lib.ColorSpace.DeviceRGB, false, true);
-    const png = pix.asPNG();
-    if (pdfPageObjectUrl) { try { URL.revokeObjectURL(pdfPageObjectUrl); } catch (e) { } }
-    pdfPageObjectUrl = URL.createObjectURL(new Blob([png], { type: 'image/png' }));
-    const img = document.createElement('img');
-    img.src = pdfPageObjectUrl;
-    img.alt = '第 ' + pageNo + ' 页';
-    img.style.width = '100%';
-    img.style.height = 'auto';
-    const tip = book.chapters[chIdx + 1] ? (() => {
-      const d = document.createElement('div');
-      d.className = 'pdf-page-next';
-      d.textContent = '下滑继续看第 ' + (pageNo + 1) + ' 页';
-      return d;
-    })() : null;
-    mount(img, tip);
-    return null;
-  }).catch(err => {
-    console.warn('MuPDF 渲染失败，退回 pdf.js', err);
-    return renderPdfPageFallback(chIdx, ch).catch(e2 => {
-      const wrap = document.getElementById('pdfPageWrap');
-      if (wrap) wrap.innerHTML = '<div class="pdf-page-status">第 ' + pageNo + ' 页渲染失败：' + escapeHtml((e2 && e2.message) || String(e2)) + '</div>';
-    });
-  });
-}
+  const nextTip = () => {
+    if (!book.chapters || !book.chapters[chIdx + 1]) return null;
+    const d = document.createElement('div');
+    d.className = 'pdf-page-next';
+    d.textContent = '下滑继续看第 ' + (pageNo + 1) + ' 页';
+    return d;
+  };
 
-/* 备用渲染：仓库自带的 pdf.js（扫描件没问题；个别不内嵌中文字体的 PDF 可能显示乱码） */
-function renderPdfPageFallback(chIdx, ch) {
-  const book = state.currentBook;
-  const pageNo = ch.pdfPage;
-  return getPdfDoc(book).then(async doc => {
-    if (state.currentChapter !== chIdx) return;
+  const paintPdfJs = () => getPdfDoc(book).then(async doc => {
+    if (state.currentChapter !== chIdx) return 'stale';
     const page = await doc.getPage(pageNo);
     const base = page.getViewport({ scale: 1 });
-    const content = document.getElementById('readerContent');
-    let avail = Math.min((content.clientWidth || 420) - 8, state.settings.contentWidth || 640);
-    if (avail < 220) avail = Math.min((window.innerWidth || 420) - 16, 640);
-    const dpr = Math.min(2, window.devicePixelRatio || 1);
-    const vp = page.getViewport({ scale: (avail / base.width) * dpr });
+    const scale = pdfPageScaleFor(pdfPageAvail(), base.width, base.height);
+    const vp = page.getViewport({ scale });
     const canvas = document.createElement('canvas');
     canvas.width = Math.round(vp.width);
     canvas.height = Math.round(vp.height);
     canvas.style.width = '100%';
     canvas.style.height = 'auto';
+    canvas.style.background = '#fff';
     await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
+    if (!mount(canvas, nextTip())) return 'stale';
+    return 'ok';
+  });
+
+  const paintMupdf = () => getMupdfDoc(book).then(doc => {
+    if (state.currentChapter !== chIdx) return 'stale';
+    const page = doc.loadPage(pageNo - 1);
+    const b = page.getBounds();
+    const pw = b[2] - b[0], ph = b[3] - b[1];
+    const zoom = pdfPageScaleFor(pdfPageAvail(), pw, ph);
+    const lib = window.__mupdfLib;
+    const matrix = lib.mupdf ? lib.mupdf.Matrix.scale(zoom, zoom) : lib.Matrix.scale(zoom, zoom);
+    const cs = lib.mupdf ? lib.mupdf.ColorSpace.DeviceRGB : lib.ColorSpace.DeviceRGB;
+    const pix = page.toPixmap(matrix, cs, false, true);
+    // 用 PNG：JPEG 会在字边上留彩色噪点（尤其毛笔字），文字页看着脏
+    const blob = new Blob([pix.asPNG()], { type: 'image/png' });
+    if (pdfPageObjectUrl) { try { URL.revokeObjectURL(pdfPageObjectUrl); } catch (e) { } }
+    pdfPageObjectUrl = URL.createObjectURL(blob);
+    const img = document.createElement('img');
+    img.src = pdfPageObjectUrl;
+    img.alt = '第 ' + pageNo + ' 页';
+    img.style.width = '100%';
+    img.style.height = 'auto';
+    if (!mount(img, nextTip())) return 'stale';
+    return 'ok';
+  });
+
+  const explain = err2 => {
     const wrap = document.getElementById('pdfPageWrap');
-    if (!wrap || state.currentChapter !== chIdx) return;
-    wrap.innerHTML = '';
-    wrap.appendChild(canvas);
+    if (!wrap) return;
+    wrap.innerHTML = '<div class="pdf-page-status">第 ' + pageNo + ' 页渲染失败：' +
+      escapeHtml((err2 && err2.message) || String(err2)) +
+      '<br>可以到设置里打开「老 PDF 兼容引擎」再试一次。</div>';
+  };
+
+  if (engine === 'mupdf') {
+    return paintMupdf().catch(err => {
+      console.warn('兼容引擎没起来，改用 pdf.js', err);
+      return paintPdfJs().catch(explain);
+    });
+  }
+  return paintPdfJs().catch(err => {
+    console.warn('pdf.js 渲染失败，改用兼容引擎', err);
+    return paintMupdf().catch(explain);
   });
 }
 

@@ -2677,10 +2677,37 @@ function blobToDataURL(blob) {
 let muPdfPromise = null;
 const mupdfDocCache = {};
 
+let muPdfWarmPromise = null;
+
+/* 先自己下载 wasm，好在页面上显示百分比；下完浏览器已缓存，Emscripten 再取一次几乎瞬完 */
+function warmMuPdfWasm() {
+  if (muPdfWarmPromise) return muPdfWarmPromise;
+  muPdfWarmPromise = (async () => {
+    try {
+      const url = new URL('mupdf/mupdf-wasm.wasm', document.baseURI).href;
+      const resp = await fetch(url);
+      if (!resp.ok || !resp.body) return;
+      const total = Number(resp.headers.get('content-length')) || 0;
+      const reader = resp.body.getReader();
+      let got = 0;
+      for (;;) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        got += chunk.value.length;
+        const pct = total ? Math.min(100, Math.round(got / total * 100)) : 0;
+        const st = document.querySelector('.pdf-page-status');
+        if (st) st.innerHTML = '正在下载 PDF 排版引擎' + (pct ? ' ' + pct + '%' : '…') +
+          '<br>（首次约 4.6 MB，下完会缓存，以后打开不用再等）';
+      }
+    } catch (e) { /* 失败就交给 import 自己再取 */ }
+  })();
+  return muPdfWarmPromise;
+}
+
 function loadMuPdf() {
   if (window.__mupdfLib) return Promise.resolve(window.__mupdfLib);
   if (muPdfPromise) return muPdfPromise;
-  muPdfPromise = import(new URL('mupdf/mupdf.js', document.baseURI).href).then(async (mod) => {
+  muPdfPromise = warmMuPdfWasm().then(() => import(new URL('mupdf/mupdf.js', document.baseURI).href)).then(async (mod) => {
     const lib = mod;
     if (lib && typeof lib.default === 'object' && lib.default && lib.default.Document) {
       // 兼容 default 导出

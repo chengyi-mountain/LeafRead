@@ -1364,7 +1364,7 @@ function setProgress(bookId, data) {
 // Book cover SVG/HTML
 function bookCoverHTML(book) {
   if (book.coverUrl) {
-    return `<div class="book-cover img-cover"><img src="${escapeHtml(book.coverUrl)}" alt="${escapeHtml(book.title)}" loading="lazy" decoding="async"></div>`;
+    return `<div class="book-cover img-cover"><img src="${escapeHtml(book.coverUrl)}" alt="${escapeHtml(book.title)}" loading="eager" decoding="async"></div>`;
   }
   const cls = coverClass(book);
   const cat = normalizeCategory(book.category || guessCategory(book));

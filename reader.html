@@ -862,9 +862,20 @@ mark { background:var(--accent); color:#fff; padding:0 2px; border-radius:2px; }
 
 /* ===== Comic / image pages ===== */
 .comic-page { text-align:center; margin: 12px 0; }
-.pdf-page-wrap { text-align:center; margin: 8px 0 24px; }
-.pdf-page-wrap canvas { max-width:100%; height:auto; display:block; margin:0 auto;
+#readerContent.pdf-narrow { padding-left:10px; padding-right:10px; }
+.pdf-page-wrap { text-align:center; margin: 8px 0 24px; overflow-x:auto; overflow-y:visible; -webkit-overflow-scrolling:touch; }
+.pdf-page-wrap canvas { max-width:none; height:auto; display:block; margin:0 auto;
   border-radius:4px; box-shadow:0 4px 18px rgba(0,0,0,.14); background:#fff; }
+/* PDF 缩放条：只在这类「原页」书上出现 */
+#pdfZoomBar { position:fixed; right:12px; bottom:78px; display:none; align-items:center; gap:2px;
+  padding:4px 5px; border-radius:999px; background:var(--paper,#fff); border:1px solid var(--border,#e5e5e5);
+  box-shadow:0 4px 16px rgba(0,0,0,.16); z-index:60; font-size:12px; color:var(--text-sub,#666);
+  padding-bottom:calc(4px + env(safe-area-inset-bottom, 0px)); }
+#pdfZoomBar button { min-width:34px; height:32px; border:0; background:transparent; font-size:16px;
+  color:var(--text,#333); border-radius:999px; line-height:1; }
+#pdfZoomBar button:active { background:var(--border,#eee); }
+#pdfZoomVal { min-width:44px; text-align:center; font-variant-numeric:tabular-nums; }
+#pdfFitBtn { font-size:12px !important; padding:0 8px; color:var(--text-sub,#666) !important; }
 .pdf-page-status { padding:60px 16px; font-size:14px; color:var(--text-sub); text-align:center; line-height:1.9; }
 .pdf-page-next { margin-top:14px; font-size:12px; color:var(--text-muted); letter-spacing:.08em; }
 .comic-page img { max-width:100%; height:auto; border-radius:8px; box-shadow:0 4px 20px rgba(0,0,0,.12); display:block; margin:0 auto; }
@@ -1328,6 +1339,8 @@ const state = {
     mode: 'scroll',
     animType: 'slide',
     pageShadow: true,
+    pdfFit: 'auto',        /* auto | width | page */
+    pdfZoom: null,         /* 手动缩放倍数；null = 按屏幕宽度给默认（手机 135%，电脑 100%） */
     pdfTextMode: false,
     pdfMupdf: false,
     warmLight: 0,
@@ -1840,6 +1853,10 @@ function openBook(book) {
 }
 
 function openBookNow(book) {
+  if (!book || !book.chapters || !book.chapters.length) {
+    toast('《' + ((book && book.title) || '这本书') + '》正文还没读到，回到书架再点一次试试', 'error', 3600);
+    return;
+  }
   state.currentBook = book;
   const prog = getProgress(book.id);
   state.currentChapter = prog.chapter || 0;
@@ -1849,6 +1866,7 @@ function openBookNow(book) {
   showTopbar();
   applySettings();
   renderChapter(state.currentChapter, true);
+  updatePdfZoomBar();
   recordRead();
 }
 
@@ -1955,6 +1973,7 @@ function setReaderMode() {
   const curCh = state.currentBook && state.currentBook.chapters && state.currentBook.chapters[state.currentChapter];
   // PDF 原页 / 整页图片没有可排版的文字，翻页模式会把它切碎，统一按单页滚动显示
   const isPageOnly = !!(curCh && (curCh.pdfPage || curCh.imageUrl));
+  content.classList.toggle('pdf-narrow', !!isPageOnly);
   const paged = state.settings.mode === 'paged' && !isPageOnly;
   readerEl.classList.toggle('paged-mode', paged);
   content.classList.toggle('paged', paged);
@@ -2221,6 +2240,14 @@ function renderSettings(body) {
         <label>老 PDF 兼容引擎</label>
         <div class="toggle ${s.pdfMupdf?'on':''}" id="togglePdfMupdf"></div>
       </div>
+      <div class="setting-row" id="pdfFitRow">
+        <label>PDF 显示大小</label>
+        <div class="seg-control">
+          <div class="seg-btn ${(s.pdfFit||'auto')==='auto'?'active':''}" data-pdfit="auto">自适应</div>
+          <div class="seg-btn ${(s.pdfFit||'auto')==='width'?'active':''}" data-pdfit="width">适宽</div>
+          <div class="seg-btn ${(s.pdfFit||'auto')==='page'?'active':''}" data-pdfit="page">整页</div>
+        </div>
+      </div>
     </div>
       <div class="settings-group">
       <div class="settings-group-title">朗读</div>
@@ -2301,6 +2328,10 @@ function renderSettings(body) {
       toast('这本是「原页」方式导入的，开关不会重排已导入的书；想按文字读，把同一个 PDF 再导入一次即可（原页方式本来就更清楚）', 'info', 5200);
     }
   };
+  body.querySelectorAll('.seg-btn[data-pdfit]').forEach(el => el.onclick = () => {
+    s.pdfFit = el.dataset.pdfit;
+    saveState(); renderSettings(body); pdfRedraw();
+  });
   body.querySelector('#togglePdfMupdf').onclick = function() {
     s.pdfMupdf = !s.pdfMupdf; saveState(); renderSettings(body);
     toast(s.pdfMupdf ? 'PDF 改用兼容引擎（老中文 PDF 显示乱码时打开它）' : 'PDF 引擎已回到自动', 'success');
@@ -3241,28 +3272,128 @@ async function parseImageBook(file, name) {
 }
 
 /* 把某一页 PDF 渲染出来放进正文区 */
-function pdfPageAvail() {
+/* 能用来显示一页 PDF 的盒子：宽受正文列宽限制，高受窗口高度限制 */
+function pdfPageBox() {
+  const wrap = document.getElementById('pdfPageWrap');
+  const inner = document.getElementById('readerInner');
   const content = document.getElementById('readerContent');
-  let avail = Math.min((content.clientWidth || 420) - 8, (state.settings && state.settings.contentWidth) || 640);
-  if (avail < 220) avail = Math.min((window.innerWidth || 420) - 24, 640);
-  return avail;
+  const host = (wrap && wrap.clientWidth) || (inner && inner.clientWidth) || ((content && content.clientWidth) || 380);
+  const cw = Math.min(host - 2, (state.settings && state.settings.contentWidth) || 640);
+  const topbar = document.getElementById('topbar');
+  const topH = (topbar && topbar.offsetHeight) || 56;
+  const availH = Math.max(240, (window.innerHeight || 700) - topH - 88);
+  return { w: Math.max(180, Math.min(cw, (window.innerWidth || 390) - 16)), h: availH };
 }
 
-/* 画布尺寸按屏幕真实像素来（最多 3 倍），再套一个像素预算，
-   这样 DPR 3 的手机上不会再被放大糊掉，也不会把内存画爆 */
-function pdfPageScaleFor(cssWidth, pageWidth, pageHeight) {
+/* 自适应：大屏整页看全（电脑上不再一页顶到屏幕外），手机铺满宽度 */
+function pdfFitMode(pageW, pageH) {
+  const st = state.settings || {};
+  if (st.pdfFit === 'width' || st.pdfFit === 'page') return st.pdfFit;
+  const box = pdfPageBox();
+  if (!pageW || !pageH) return 'width';
+  // 按宽度铺满时，页高超出屏幕就退回整页，免得一页顶到屏幕外
+  return (pageH * (box.w / pageW)) > box.h + 8 ? 'page' : 'width';
+}
+
+/* 显示尺寸 = 适配方式 * 手动倍数；画布再按屏幕真实像素渲染（最多 3 倍）+ 像素预算，
+   所以放大之后字是重新画出来的，不是把图拉大 */
+function pdfLayoutFor(pageWidth, pageHeight) {
+  const box = pdfPageBox();
+  const st = state.settings || {};
   const dpr = Math.min(3, window.devicePixelRatio || 1);
-  let scale = (cssWidth / pageWidth) * dpr;
-  const budget = 4200000;
+  const fitW = box.w / pageWidth;
+  const fitH = box.h / pageHeight;
+  const mode = pdfFitMode(pageWidth, pageHeight);
+  const mult = mode === 'page' ? 1 : Math.max(0.4, Math.min(4, Number(st.pdfZoom) || 1));
+  let cssScale = mode === 'page' ? Math.min(fitW, fitH) : fitW;
+  cssScale *= mult;
+  let scale = cssScale * dpr;
+  const budget = 6000000;
   const px = (pageWidth * scale) * (pageHeight * scale);
   if (px > budget) scale *= Math.sqrt(budget / px);
-  return scale;
+  return { scale: scale, cssW: Math.max(120, Math.round(pageWidth * cssScale)), dpr: dpr, cssScale: cssScale };
+}
+
+let pdfResizeTimer = null;
+window.addEventListener('resize', () => {
+  if (!state.currentBook || state.currentBook.pdfMode !== 'pages') return;
+  clearTimeout(pdfResizeTimer);
+  pdfResizeTimer = setTimeout(() => { pdfRedraw(); }, 240);
+});
+
+/* 双击页面在「适宽」和 200% 之间来回，手机上比拖滑块快 */
+document.addEventListener('dblclick', e => {
+  if (!e.target.closest || !e.target.closest('#pdfPageWrap')) return;
+  const cur = Number(state.settings.pdfZoom) || 1;
+  pdfZoomApply(cur > 1.6 ? 1 : 2);
+});
+
+function ensurePdfZoomBar() {
+  if (document.getElementById('pdfZoomBar')) return;
+  const el = document.createElement('div');
+  el.id = 'pdfZoomBar';
+  el.innerHTML = '<button id="pdfZoomOut" aria-label="缩小">－</button>' +
+    '<span id="pdfZoomVal">100%</span>' +
+    '<button id="pdfZoomIn" aria-label="放大">＋</button>' +
+    '<button id="pdfFitBtn" aria-label="切换适应方式">适宽</button>';
+  document.body.appendChild(el);
+  el.querySelector('#pdfZoomOut').onclick = () => pdfZoomStep(-1);
+  el.querySelector('#pdfZoomIn').onclick = () => pdfZoomStep(1);
+  el.querySelector('#pdfZoomVal').onclick = () => pdfZoomApply(1);
+  el.querySelector('#pdfFitBtn').onclick = () => pdfFitToggle();
+}
+
+function pdfRedraw() {
+  if (!state.currentBook || state.currentBook.pdfMode !== 'pages') return;
+  renderChapter(state.currentChapter, false);
+  updatePdfZoomBar();
+}
+
+function pdfZoomApply(z) {
+  state.settings.pdfZoom = Math.max(0.4, Math.min(4, Math.round(z * 100) / 100));
+  saveState(); pdfRedraw();
+}
+
+function pdfZoomStep(dir) {
+  const ch = state.currentBook && state.currentBook.chapters && state.currentBook.chapters[state.currentChapter];
+  if (ch && ch.pdfPage && pdfFitMode(ch.pdfW || 595, ch.pdfH || 842) === 'page') {
+    state.settings.pdfFit = 'width';
+  }
+  const cur = Number(state.settings.pdfZoom) || 1;
+  const next = dir > 0 ? cur + (cur < 1 ? 0.1 : cur < 2 ? 0.2 : 0.4) : cur - (cur <= 1 ? 0.1 : cur <= 2 ? 0.2 : 0.4);
+  pdfZoomApply(next);
+}
+
+function pdfFitToggle() {
+  const cur = pdfFitMode();
+  state.settings.pdfFit = cur === 'page' ? 'width' : 'page';
+  saveState(); pdfRedraw();
+  toast(cur === 'page' ? '改成铺满宽度（字更大，可左右滑动）' : '改成整页显示（能一次看全）', 'info', 2200);
+}
+
+function updatePdfZoomBar() {
+  ensurePdfZoomBar();
+  const bar = document.getElementById('pdfZoomBar');
+  if (!bar) return;
+  const ch = state.currentBook && state.currentBook.chapters && state.currentBook.chapters[state.currentChapter];
+  const on = !!(state.currentBook && state.currentBook.pdfMode === 'pages' && ch && ch.pdfPage);
+  bar.style.display = on ? 'flex' : 'none';
+  if (!on) return;
+  const chNow = state.currentBook.chapters[state.currentChapter];
+  const pw = (chNow && chNow.pdfW) || 595, ph = (chNow && chNow.pdfH) || 842;
+  const boxNow = pdfPageBox();
+  const layNow = pdfLayoutFor(pw, ph);
+  const isPage = pdfFitMode(pw, ph) === 'page';
+  // 数字显示「这一页实际占了容器宽度的多少」，整页时自然是百元以下，不会和按钮重名
+  document.getElementById('pdfZoomVal').textContent = Math.round(layNow.cssW / boxNow.w * 100) + '%';
+  document.getElementById('pdfFitBtn').textContent = isPage ? '整页' : '适宽';
 }
 
 function renderPdfPage(chIdx, ch) {
   const inner = document.getElementById('readerInner');
   const book = state.currentBook;
   const pageNo = ch.pdfPage;
+  if (!ch.pdfW) { ch.pdfW = state.currentBook && state.currentBook.pdfSize ? state.currentBook.pdfSize[0] : 595; ch.pdfH = state.currentBook && state.currentBook.pdfSize ? state.currentBook.pdfSize[1] : 842; }
   const engine = pdfRendererFor(book);
   inner.innerHTML = '<div class="pdf-page-wrap" id="pdfPageWrap"><div class="pdf-page-status">' +
     (engine === 'mupdf'
@@ -3281,6 +3412,13 @@ function renderPdfPage(chIdx, ch) {
     wrap.innerHTML = '';
     wrap.appendChild(node);
     if (extra) wrap.appendChild(extra);
+    updatePdfZoomBar();
+    try {
+      if (!localStorage.getItem('pdfZoomHintSeen')) {
+        localStorage.setItem('pdfZoomHintSeen', '1');
+        setTimeout(() => toast('PDF 页面太小或太大，用右下角的 － ＋ 调，双击页面也能放大', 'info', 4200), 600);
+      }
+    } catch (e) { }
     updateProgress();
     saveState();
     return true;
@@ -3298,12 +3436,12 @@ function renderPdfPage(chIdx, ch) {
     if (state.currentChapter !== chIdx) return 'stale';
     const page = await doc.getPage(pageNo);
     const base = page.getViewport({ scale: 1 });
-    const scale = pdfPageScaleFor(pdfPageAvail(), base.width, base.height);
-    const vp = page.getViewport({ scale });
+    const lay = pdfLayoutFor(base.width, base.height);
+    const vp = page.getViewport({ scale: lay.scale });
     const canvas = document.createElement('canvas');
     canvas.width = Math.round(vp.width);
     canvas.height = Math.round(vp.height);
-    canvas.style.width = '100%';
+    canvas.style.width = lay.cssW + 'px';
     canvas.style.height = 'auto';
     canvas.style.background = '#fff';
     await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
@@ -3316,7 +3454,8 @@ function renderPdfPage(chIdx, ch) {
     const page = doc.loadPage(pageNo - 1);
     const b = page.getBounds();
     const pw = b[2] - b[0], ph = b[3] - b[1];
-    const zoom = pdfPageScaleFor(pdfPageAvail(), pw, ph);
+    const lay = pdfLayoutFor(pw, ph);
+    const zoom = lay.scale;
     const lib = window.__mupdfLib;
     const matrix = lib.mupdf ? lib.mupdf.Matrix.scale(zoom, zoom) : lib.Matrix.scale(zoom, zoom);
     const cs = lib.mupdf ? lib.mupdf.ColorSpace.DeviceRGB : lib.ColorSpace.DeviceRGB;
@@ -3328,7 +3467,7 @@ function renderPdfPage(chIdx, ch) {
     const img = document.createElement('img');
     img.src = pdfPageObjectUrl;
     img.alt = '第 ' + pageNo + ' 页';
-    img.style.width = '100%';
+    img.style.width = lay.cssW + 'px';
     img.style.height = 'auto';
     if (!mount(img, nextTip())) return 'stale';
     return 'ok';

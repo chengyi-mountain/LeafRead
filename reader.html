@@ -2784,9 +2784,29 @@ async function parsePdfBook(file) {
     if (!text.trim() || textLooksGarbled(text)) {
       throw new Error('这个 PDF 抽不出可用文字（多半是扫描件）。请在设置里关掉「PDF 按文字阅读」，用原页阅读打开。');
     }
-    const chapters = splitTextIntoChapters(text);
+    text = stripPdfToc(text);
+    const textChapters = splitLongChapters(splitTextIntoChapters(text), 12000);
+    // MuPDF 抽出来的标题里汉字之间常带空格；自动编号的章再用正文首行补个真标题
+    const tidy = s => String(s || '').replace(/(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])/g, '').replace(/\s+/g, ' ').trim();
+    const tidyBody = s => String(s || '')
+      .replace(/(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])/g, '')
+      .replace(/(?<=[\u4e00-\u9fff])\s+(?=[，。、；：？！“”‘’（）《》])/g, '')
+      .replace(/(?<=[，。、；：？！“”‘’（）《》])\s+(?=[\u4e00-\u9fff])/g, '');
+    textChapters.forEach(ch => {
+      ch.body = tidyBody(ch.body);
+      if (/^第\s*\d+\s*章$/.test(ch.title) || !ch.title) {
+        const first = tidy((ch.body || '').split(/\n/)[0]);
+        if (first && first.length <= 40) ch.title = first;
+      } else {
+        ch.title = tidy(ch.title);
+      }
+    });
+    // 开头的目录页（点线 + 一堆页码）整章剔掉，不让人第一篇点进目录
+    while (textChapters.length > 1 && /[⋯…]{2,}/.test(textChapters[0].body.slice(0, 600))) {
+      textChapters.shift();
+    }
     return {
-      title, author: '佚名', cover: 'imported', format: 'pdf', lang: detectLang(text), chapters,
+      title, author: '佚名', cover: 'imported', format: 'pdf', lang: detectLang(text), chapters: textChapters,
       note: 'PDF 文字模式 · 共 ' + n + ' 页 · 文字层由 ' + engine + ' 提取' + (res.truncated ? '（仅前 2000 页）' : ''),
     };
   }
@@ -2970,8 +2990,8 @@ async function extractPdfTextMupdf(file) {
   for (let i = 0; i < n; i++) {
     try {
       const page = doc.loadPage(i);
-      const st = page.toStructuredText('preserve-whitespace');
-      out += st.asText().replace(/\s*\n\s*/g, '\n').trim() + '\n\n';
+      const st = page.toStructuredText();
+      out += st.asText().trim() + '\n\n';
     } catch (e) { /* 单页失败跳过 */ }
     if (i % 30 === 0) await new Promise(r => setTimeout(r, 0));
   }
@@ -3702,6 +3722,44 @@ function detectLang(text) {
   const sample = text.slice(0, 1000);
   const cnChars = (sample.match(/[\u4e00-\u9fff]/g) || []).length;
   return cnChars > sample.length * 0.2 ? 'zh' : 'en';
+}
+
+/* PDF 的目录页会混进正文：形如「第一章 如何研究战争 ⋯⋯ 170」或纯页码，先剔掉 */
+function stripPdfToc(text) {
+  const lines = String(text || '').split(/\n/);
+  const keep = lines.filter(line => {
+    const t = line.trim();
+    if (!t) return true;
+    if (/^[\d\-—\s]+$/.test(t)) return false;                       // 纯页码
+    if (((t.match(/[⋯…]/g) || []).length) >= 6) return false;   // 目录页被合并成一整行时，点线会重复很多次
+    // 只剔除「短行 + 点线 + 页码」这种目录行；正文整页长行绝不整行丢
+    if (t.length <= 140 && (/[⋯]{2,}/.test(t) || /[…]{2,}/.test(t) || /\.{4,}/.test(t)) && /[\d０-９]{1,4}\s*$/.test(t)) return false;
+    if (/\.{4,}/.test(t) && /[\d０-９]{1,4}\s*$/.test(t)) return false;         // .......170
+    return true;
+  });
+  return keep.join('\n');
+}
+
+/* 一章太长（如 PDF 里整卷没分节）就按空行切开，避免一屏几万字 */
+function splitLongChapters(list, maxLen) {
+  const out = [];
+  (list || []).forEach(ch => {
+    const body = ch.body || '';
+    if (body.length <= maxLen) { out.push(ch); return; }
+    const paras = body.split(/\n\s*\n/);
+    let acc = '', part = 1;
+    const flush = () => {
+      if (!acc.trim()) return;
+      out.push({ title: part === 1 ? ch.title : ch.title + '（续 ' + part + '）', body: acc.trim() });
+      part++; acc = '';
+    };
+    paras.forEach(p => {
+      if ((acc + p).length > maxLen && acc) flush();
+      acc += p + '\n\n';
+    });
+    flush();
+  });
+  return out;
 }
 
 function splitTextIntoChapters(text) {

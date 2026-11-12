@@ -2292,7 +2292,14 @@ function renderSettings(body) {
   body.querySelectorAll('.seg-btn[data-anim]').forEach(el => el.onclick = () => { s.animType = el.dataset.anim; saveState(); renderSettings(body); });
   body.querySelector('#toggleShadow').onclick = function() { s.pageShadow = !s.pageShadow; saveState(); renderSettings(body); };
   body.querySelector('#togglePdfText').onclick = function() {
-    s.pdfTextMode = !s.pdfTextMode; applySettings(); saveState(); renderSettings(body);
+    const turningOn = !s.pdfTextMode;
+    s.pdfTextMode = turningOn; applySettings(); saveState(); renderSettings(body);
+    // 文字模式是在导入时抽文字重排的：已经按原页导入的书不会因为拨开关而变，
+    // 与其让人以为坏了，不如说清楚怎么生效
+    const cb = state.currentBook;
+    if (turningOn && cb && cb.format === 'pdf' && cb.pdfMode === 'pages') {
+      toast('这本是「原页」方式导入的，开关不会重排已导入的书；想按文字读，把同一个 PDF 再导入一次即可（原页方式本来就更清楚）', 'info', 5200);
+    }
   };
   body.querySelector('#togglePdfMupdf').onclick = function() {
     s.pdfMupdf = !s.pdfMupdf; saveState(); renderSettings(body);

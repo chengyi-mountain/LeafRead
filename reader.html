@@ -2966,11 +2966,42 @@ function pdfStatusHTML(html) {
 
 /* 先自己下载 wasm，好在页面上显示百分比；下完浏览器已缓存，Emscripten 再取一次几乎瞬完 */
 const MU_PDF_WASM_BYTES = 10416688; /* mupdf/mupdf-wasm.wasm 解压后的真实字节数 */
+/* GitHub Pages 只给 wasm 缓存 10 分钟（Cache-Control: max-age=600），
+   过了就重下 4.5 MB —— 所以下完自己存一份在本机。 */
+const MU_PDF_CACHE = 'leafread-engine-v1';
+const MU_PDF_CACHE_KEY = '/mupdf/mupdf-wasm-' + MU_PDF_WASM_BYTES + '.wasm';
+let muPdfWasmBytes = null;
+
+async function readEngineCache() {
+  try {
+    if (!window.caches) return null;
+    const c = await caches.open(MU_PDF_CACHE);
+    const r = await c.match(MU_PDF_CACHE_KEY);
+    if (!r) return null;
+    const buf = await r.arrayBuffer();
+    if (!buf || !buf.byteLength) return null;
+    return buf;
+  } catch (e) { return null; }
+}
+
+async function writeEngineCache(buf) {
+  try {
+    if (!window.caches || !buf || !buf.byteLength) return;
+    const c = await caches.open(MU_PDF_CACHE);
+    await c.put(MU_PDF_CACHE_KEY, new Response(buf, { headers: { 'Content-Type': 'application/wasm' } }));
+  } catch (e) { /* 存不下就算了，不影响这次阅读 */ }
+}
 
 function warmMuPdfWasm() {
   if (muPdfWarmPromise) return muPdfWarmPromise;
   muPdfWarmPromise = (async () => {
     try {
+      const cached = await readEngineCache();
+      if (cached) {
+        muPdfWasmBytes = cached;
+        pdfStatusHTML('兼容引擎已在本机，正在初始化…<br>（之后打开都不用再下载）');
+        return;
+      }
       const url = new URL('mupdf/mupdf-wasm.wasm', document.baseURI).href;
       const resp = await fetch(url);
       if (!resp.ok || !resp.body) throw new Error('兼容引擎文件取不到（网络或缓存问题）');
@@ -2978,6 +3009,7 @@ function warmMuPdfWasm() {
       const reader = resp.body.getReader();
       const size = total ? (total / 1048576).toFixed(1) + ' MB' : '十几 MB';
       let got = 0;
+      const parts = [];
       for (;;) {
         // 读一块最多等 45 秒：网卡住不要让它永远停在同一个百分比
         const chunk = await Promise.race([
@@ -2985,6 +3017,7 @@ function warmMuPdfWasm() {
           new Promise((_, rej) => setTimeout(() => rej(new Error('兼容引擎下载中断（网络卡住了）')), 45000))
         ]);
         if (chunk.done) break;
+        parts.push(chunk.value);
         got += chunk.value.length;
         // content-length 是压缩后的体积，浏览器给的却是解压后的字节（约 10 MB），
         // 拿它当分母就会提前显示 100%，然后一直停在 100% —— 这就是「卡在 100%」的来历。
@@ -2993,6 +3026,11 @@ function warmMuPdfWasm() {
         pdfStatusHTML('正在下载 PDF 兼容引擎 ' + pct + '%' +
           '<br>（这本是老版中文 PDF，要用兼容引擎，首次约 ' + size + '，下完会缓存，以后不用再等）');
       }
+      const all = new Uint8Array(got);
+      let at = 0;
+      for (const p of parts) { all.set(p, at); at += p.length; }
+      muPdfWasmBytes = all.buffer;
+      writeEngineCache(muPdfWasmBytes);
       // 下载完还要初始化，如实说明，别让人以为卡在 100%
       pdfStatusHTML('兼容引擎下载完成，正在初始化…<br>（第一次要等十几秒，之后打开就快多了）');
     } catch (e) {
@@ -3018,8 +3056,15 @@ function loadMuPdf() {
   const raw = warmMuPdfWasm()
     // 下载已经按真实字节显示进度；这里只给「初始化」设期限：真机上偶发初始化卡死，
     // 90 秒还不动就报错退回 pdf.js，不让人永远停在一个死进度上
-    .then(() => withDeadline(import(new URL('mupdf/mupdf.js', document.baseURI).href), 90000,
-      '兼容引擎初始化超时（这台手机可能不支持 Wasm，或网速太慢）'))
+    .then(() => {
+      // mupdf.js 会把 globalThis["$libmupdf_wasm_Module"] 交给 emscripten；
+      // 给它 wasmBinary，它就不再自己发请求（否则缓存了也白缓存）
+      if (muPdfWasmBytes) {
+        globalThis['$libmupdf_wasm_Module'] = { wasmBinary: muPdfWasmBytes, print: function () { }, printErr: function () { } };
+      }
+      return withDeadline(import(new URL('mupdf/mupdf.js', document.baseURI).href), 90000,
+        '兼容引擎初始化超时（这台手机可能不支持 Wasm，或网速太慢）');
+    })
     .then(async (mod) => {
       const lib = mod;
       if (lib && typeof lib.default === 'object' && lib.default && lib.default.Document) {

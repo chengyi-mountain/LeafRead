@@ -350,6 +350,14 @@ input, textarea, select { font:inherit; color:inherit; }
 @media (max-width:560px) {
   .shelf-featured .featured-row { grid-template-columns:repeat(2, 1fr); gap:14px 16px; }
 }
+/* 「中国传统文化」专栏占位卡 */
+.trad-placeholder {
+  grid-column: 1 / -1; padding: 22px 18px; border-radius: 10px;
+  border: 1px dashed var(--border); background: linear-gradient(160deg, rgba(139,111,71,.06), rgba(139,111,71,.02));
+  text-align: center;
+}
+.trad-placeholder .trad-ph-title { font-size: 15px; font-weight: 700; letter-spacing: .18em; color: var(--text-main); margin-bottom: 8px; }
+.trad-placeholder .trad-ph-text { font-size: 11.5px; line-height: 1.9; color: var(--text-muted); }
 /* 真实封面图（PDF 内嵌书用） */
 .book-cover.img-cover { padding:0; display:block; background:var(--bg-elev); }
 .book-cover.img-cover img { width:100%; height:100%; object-fit:cover; display:block; border-radius:8px; }
@@ -1141,6 +1149,18 @@ mark { background:var(--accent); color:#fff; padding:0 2px; border-radius:2px; }
         </div>
         <div class="featured-row" id="featuredRow"></div>
       </div>
+      <div class="shelf-featured" id="shelfRed" style="display:none">
+        <div class="featured-head">
+          <div class="featured-title">红色经典<span>公有领域作品 · 原文全篇</span></div>
+        </div>
+        <div class="featured-row" id="redRow"></div>
+      </div>
+      <div class="shelf-featured" id="shelfTrad" style="display:none">
+        <div class="featured-head">
+          <div class="featured-title">中国传统文化<span>专栏已开 · 内容陆续补入</span></div>
+        </div>
+        <div class="featured-row" id="tradRow"></div>
+      </div>
       <div class="shelf-section-title" id="builtinSectionTitle">内置书籍</div>
       <div class="book-grid" id="builtinGrid"></div>
       <div class="shelf-section-title" id="importedSectionTitle" style="display:none">已导入书籍</div>
@@ -1415,12 +1435,37 @@ const MAO_BUILTIN = [
     chapters: [], note: '原页影印 · 共 407 页' },
 ];
 
+/* ===== 「红色经典」专栏：所收作者均于 1976 年前逝世，作品已进入公有领域 ===== */
+const RED_BUILTIN = [
+  { id:'red_juebie', title:'红色家书·诀别', author:'陈觉 等', category:'经典', lang:'zh',
+    red:true, coverUrl:'books/covers/red_juebie.jpg', lazy:true, src:'books/red_juebie.js', chapterCount:7,
+    note:'6 封诀别信 · 原文全篇' },
+  { id:'red_xinyang', title:'红色家书·信仰', author:'刘伯坚 等', category:'经典', lang:'zh',
+    red:true, coverUrl:'books/covers/red_xinyang.jpg', lazy:true, src:'books/red_xinyang.js', chapterCount:7,
+    note:'6 封书信 · 原文全篇' },
+  { id:'red_fenghuo', title:'红色家书·烽火', author:'赵一曼 等', category:'经典', lang:'zh',
+    red:true, coverUrl:'books/covers/red_fenghuo.jpg', lazy:true, src:'books/red_fenghuo.js', chapterCount:6,
+    note:'5 封书信 · 原文全篇' },
+  { id:'red_qingchun', title:'红色家书·青春', author:'陈毅安 等', category:'经典', lang:'zh',
+    red:true, coverUrl:'books/covers/red_qingchun.jpg', lazy:true, src:'books/red_qingchun.js', chapterCount:5,
+    note:'4 封书信 · 原文全篇' },
+  { id:'red_rouqing', title:'红色家书·柔情', author:'陈毅 等', category:'经典', lang:'zh',
+    red:true, coverUrl:'books/covers/red_rouqing.jpg', lazy:true, src:'books/red_rouqing.js', chapterCount:6,
+    note:'5 封书信 · 原文全篇' },
+  { id:'red_jiafeng', title:'红色家书·家风', author:'毛岸英 等', category:'经典', lang:'zh',
+    red:true, coverUrl:'books/covers/red_jiafeng.jpg', lazy:true, src:'books/red_jiafeng.js', chapterCount:5,
+    note:'4 封书信 · 原文全篇' },
+  { id:'red_keai', title:'可爱的中国（节选）', author:'方志敏', category:'经典', lang:'zh',
+    red:true, coverUrl:'books/covers/red_keai.jpg', lazy:true, src:'books/red_keai.js', chapterCount:2,
+    note:'狱中遗稿 · 公开发表节选' },
+];
+
 // Initialize books: built-in + imported
 function initBooks() {
   try {
     state.books = [];
     const imported = JSON.parse(localStorage.getItem('reader_imported_books_v2') || '[]');
-    const builtin = [...MAO_BUILTIN, ...(window.__BUILTIN_BOOKS__ || [])];
+    const builtin = [...MAO_BUILTIN, ...RED_BUILTIN, ...(window.__BUILTIN_BOOKS__ || [])];
     // Mark imported
     builtin.forEach(b => { b.imported = false; });
     imported.forEach(b => { b.imported = true; });
@@ -1587,10 +1632,42 @@ function renderBookshelf() {
     });
   }
 
+  // 「红色经典」专栏：独立成块，收录已进入公有领域的作品
+  const redRow = document.getElementById('redRow');
+  const tradRow = document.getElementById('tradRow');
+  const featRed = builtinAll.filter(b => b.red && (catFilter === '全部' || normalizeCategory(b.category) === catFilter) && bookMatchesQuery(b, q));
+  const redShown = !!(redRow && featRed.length && !isFiltering && !listModeNow);
+
   builtin.forEach(book => {
     if (featShown && book.featured) return;  // 已在特色区展示，避免重复
+    if (redShown && book.red) return;
     builtinGrid.appendChild(bookCard(book));
   });
+
+  if (redRow) {
+    redRow.innerHTML = '';
+    const redSectionEl = document.getElementById('shelfRed');
+    if (redSectionEl) redSectionEl.style.display = featRed.length ? '' : 'none';
+    if (redShown) featRed.forEach(b => {
+      const card = bookCard(b);
+      card.classList.add('featured-card');
+      redRow.appendChild(card);
+    });
+  }
+
+  // 「中国传统文化」专栏：先开栏，内容后续补入
+  if (tradRow) {
+    tradRow.innerHTML = '';
+    const tradSectionEl = document.getElementById('shelfTrad');
+    if (tradSectionEl) tradSectionEl.style.display = (isFiltering || listModeNow) ? 'none' : '';
+    if (!isFiltering && !listModeNow) {
+      const ph = document.createElement('div');
+      ph.className = 'trad-placeholder';
+      ph.innerHTML = '<div class="trad-ph-title">专栏筹备中</div>' +
+        '<div class="trad-ph-text">倪海厦与中医各家、经史子集等内容整理后进行补入。<br>本栏仅收录可公开传播、无版权争议的内容。</div>';
+      tradRow.appendChild(ph);
+    }
+  }
 
   if (imported.length) {
     importedSection.style.display = '';

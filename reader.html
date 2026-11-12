@@ -31,6 +31,7 @@
   --font-mono: "SF Mono", "Cascadia Code", "Consolas", monospace;
   --radius: 14px;
   --radius-sm: 8px;
+  --reader-pad-x: 26px;
   --transition: cubic-bezier(0.4, 0, 0.2, 1);
 }
 [data-theme="dark"] {
@@ -908,6 +909,7 @@ mark { background:var(--accent); color:#fff; padding:0 2px; border-radius:2px; }
   .sidebar { width:280px; }
 }
 @media (max-width: 640px) {
+  :root { --reader-pad-x: 34px; }
   .bookshelf { padding:12px; }
   .book-grid { grid-template-columns: repeat(auto-fill, minmax(88px, 1fr)); gap:10px; }
   .topbar { padding: 8px 10px; gap:4px; }
@@ -2070,6 +2072,25 @@ function setReaderMode() {
     content.style.display = '';
     pager.style.display = 'none';
   }
+  applyReaderInset(isPageOnly, paged);
+}
+
+/* 正文左右留白：文字页自己带内边距（翻页模式交给 pageCanvas 的页边距），
+   PDF 原页 / 整页图片沿用原来的容器宽度，尺寸计算不受影响。 */
+function applyReaderInset(isPageOnly, paged) {
+  const content = document.getElementById('readerContent');
+  const inner = document.getElementById('readerInner');
+  if (!content || !inner) return;
+  if (isPageOnly) {
+    content.style.paddingLeft = ''; content.style.paddingRight = '';
+    inner.style.paddingLeft = ''; inner.style.paddingRight = '';
+    return;
+  }
+  const pad = readerPadX();
+  content.style.paddingLeft = '0px';
+  content.style.paddingRight = '0px';
+  inner.style.paddingLeft = (paged ? 0 : pad) + 'px';
+  inner.style.paddingRight = (paged ? 0 : pad) + 'px';
 }
 
 // Scroll handler -> progress
@@ -4667,32 +4688,51 @@ function buildChapterHTML(chIdx) {
   return (ch.title ? `<h2>${escapeHtml(ch.title)}</h2>` : '') + body;
 }
 
-function applyPageLayout() {
+function readerPadX() {
+  const v = getComputedStyle(document.documentElement).getPropertyValue('--reader-pad-x');
+  const n = parseFloat(v);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+// 翻页模式：一页占满整个可视宽（stride），文字列宽 = 可视宽 - 左右页边距。
+// 页边距通过 column-gap 与 padding-left 实现：这样下一栏从可视区右边界外开始，
+// 不会再露出下一栏的一小条文字。
+function pageLayoutMetrics() {
   const canvas = document.getElementById('pageCanvas');
   const wrapper = document.getElementById('pageWrapper');
-  const w = Math.max(1, wrapper.clientWidth || 1);
-  // 多列排版必须让“一栏宽”等于可视页宽，且不能有内边距，否则每页会露出下一栏
+  const stride = Math.max(1, wrapper ? wrapper.clientWidth : 1);
+  const pad = readerPadX();
+  const w = Math.max(120, stride - pad * 2);
+  return { canvas, wrapper, stride, pad, w };
+}
+
+function applyPageLayout() {
+  const { canvas, wrapper, stride, pad, w } = pageLayoutMetrics();
+  if (!canvas || !wrapper) return stride;
+  // 页边距靠 canvas 的 left 偏移 + 2×页边距的列间距实现：
+  // 下一栏因此落在可视区之外、被 wrapper 裁掉，不会露出下一栏的字。
+  wrapper.style.overflow = 'hidden';
   canvas.style.boxSizing = 'border-box';
   canvas.style.padding = '0';
+  canvas.style.margin = '0';
+  canvas.style.left = pad + 'px';
   canvas.style.width = w + 'px';
   const bar = document.getElementById('readerBottomBar');
   const reserve = bar ? Math.ceil(bar.getBoundingClientRect().height) + 6 : 0;
   canvas.style.height = Math.max(160, wrapper.clientHeight - reserve) + 'px';
   canvas.style.columnWidth = w + 'px';
-  canvas.style.columnGap = '0px';
+  canvas.style.columnGap = (pad * 2) + 'px';
   canvas.style.columnFill = 'auto';
   canvas.style.overflow = 'visible';
   canvas.style.transform = 'translateX(0px)';
-  return w;
+  return stride;
 }
 
 function calcTotalPages() {
   if (state.settings.mode !== 'paged') return 1;
-  const canvas = document.getElementById('pageCanvas');
-  const wrapper = document.getElementById('pageWrapper');
-  if (!canvas || !wrapper || !canvas.firstChild) return 1;
-  const w = Math.max(1, wrapper.clientWidth || 1);
-  return Math.max(1, Math.round((canvas.scrollWidth || w) / w));
+  const { canvas, stride } = pageLayoutMetrics();
+  if (!canvas || !canvas.firstChild) return 1;
+  return Math.max(1, Math.round((canvas.scrollWidth || stride) / stride));
 }
 
 function renderPage(pageIdx, animate) {
@@ -4769,8 +4809,7 @@ function prevPage() {
 function goToPage(idx, dir) {
   if (state.settings.mode !== 'paged') return;
   const canvas = document.getElementById('pageCanvas');
-  const wrapper = document.getElementById('pageWrapper');
-  const w = Math.max(1, wrapper.clientWidth || 1);
+  const { stride } = pageLayoutMetrics();
   const total = state.totalPages || 1;
   const target = Math.max(0, Math.min(idx, total - 1));
 
@@ -4778,7 +4817,7 @@ function goToPage(idx, dir) {
 
   canvas.style.transition = 'transform .28s cubic-bezier(0.4, 0, 0.2, 1)';
   state.pageIndex = target;
-  canvas.style.transform = 'translateX(' + (-target * w) + 'px)';
+  canvas.style.transform = 'translateX(' + (-target * stride) + 'px)';
   updateProgress();
   setTimeout(() => { canvas.style.removeProperty('transition'); }, 300);
 }

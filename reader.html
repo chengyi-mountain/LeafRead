@@ -765,6 +765,11 @@ mark { background:var(--accent); color:#fff; padding:0 2px; border-radius:2px; }
 
 /* ===== Comic / image pages ===== */
 .comic-page { text-align:center; margin: 12px 0; }
+.pdf-page-wrap { text-align:center; margin: 8px 0 24px; }
+.pdf-page-wrap canvas { max-width:100%; height:auto; display:block; margin:0 auto;
+  border-radius:4px; box-shadow:0 4px 18px rgba(0,0,0,.14); background:#fff; }
+.pdf-page-status { padding:60px 16px; font-size:14px; color:var(--text-sub); text-align:center; line-height:1.9; }
+.pdf-page-next { margin-top:14px; font-size:12px; color:var(--text-muted); letter-spacing:.08em; }
 .comic-page img { max-width:100%; height:auto; border-radius:8px; box-shadow:0 4px 20px rgba(0,0,0,.12); display:block; margin:0 auto; }
 .comic-page img:active { opacity:.85; }
 
@@ -1009,7 +1014,7 @@ mark { background:var(--accent); color:#fff; padding:0 2px; border-radius:2px; }
           <span>粘贴正文</span>
         </button>
       </div>
-      <input type="file" id="shelfFileInput" multiple accept=".txt,.epub,.html,.htm,.md,.markdown,.pdf,.pptx,.ppt,.docx,.doc,.xlsx,.xls,.rtf,.cbr,.cbz,.fb2,.azw3,.mobi,.odt,.ods,.odp" style="display:none">
+      <input type="file" id="shelfFileInput" multiple accept=".txt,.epub,.html,.htm,.md,.markdown,.pdf,.pptx,.ppt,.docx,.doc,.xlsx,.xls,.rtf,.cbr,.cbz,.fb2,.azw3,.mobi,.odt,.ods,.odp,.jpg,.jpeg,.png,.gif,.webp,.bmp,.avif" style="display:none">
       <div class="import-progress" id="shelfImportProgress">
         <div class="spinner"></div>
         <span id="shelfImportProgressText">正在处理…</span>
@@ -1201,6 +1206,7 @@ const state = {
     mode: 'scroll',
     animType: 'slide',
     pageShadow: true,
+    pdfTextMode: false,
     warmLight: 0,
     flipSound: true,
     shelfView: 'grid',
@@ -1514,6 +1520,15 @@ function deleteImportedBook(book) {
     localStorage.setItem('reader_imported_books_v2', JSON.stringify(imported));
   } catch (e) { console.warn('删除时写 localStorage 失败', e); }
   idbDeleteBook(book.id);
+  // 删书时把内存里的 PDF 文档也放掉，不然 20MB 的扫描书会一直占着内存
+  if (mupdfDocCache[book.id]) {
+    try { if (mupdfDocCache[book.id].destroy) mupdfDocCache[book.id].destroy(); } catch (e) { }
+    delete mupdfDocCache[book.id];
+  }
+  if (pdfDocCache[book.id]) {
+    try { if (pdfDocCache[book.id].destroy) pdfDocCache[book.id].destroy(); } catch (e) { }
+    delete pdfDocCache[book.id];
+  }
   delete state.progress[book.id];
   delete state.bookmarks[book.id];
   delete state.highlights[book.id];
@@ -1650,6 +1665,9 @@ function renderChapter(chIdx, restorePos) {
   const inner = document.getElementById('readerInner');
   const titleHtml = ch.title ? `<h2 class="chapter-title">${escapeHtml(ch.title)}</h2>` : '';
   
+  // PDF 原页（每页一张渲染图）
+  if (ch.pdfPage) { renderPdfPage(chIdx, ch); return; }
+
   // Comic / image-based chapter
   if (ch.imageUrl) {
     inner.innerHTML = titleHtml + `<div class="chapter-body"><div class="comic-page"><img src="${ch.imageUrl}" alt="${escapeHtml(ch.title)}" loading="lazy"></div></div>`;
@@ -1715,7 +1733,10 @@ function setReaderMode() {
   const content = document.getElementById('readerContent');
   const pager = document.getElementById('pageContainer');
   const readerEl = document.getElementById('reader');
-  const paged = state.settings.mode === 'paged';
+  const curCh = state.currentBook && state.currentBook.chapters && state.currentBook.chapters[state.currentChapter];
+  // PDF 原页 / 整页图片没有可排版的文字，翻页模式会把它切碎，统一按单页滚动显示
+  const isPageOnly = !!(curCh && (curCh.pdfPage || curCh.imageUrl));
+  const paged = state.settings.mode === 'paged' && !isPageOnly;
   readerEl.classList.toggle('paged-mode', paged);
   content.classList.toggle('paged', paged);
   if (paged) {
@@ -1970,6 +1991,10 @@ function renderSettings(body) {
         <label>翻页音效</label>
         <div class="toggle ${s.flipSound?'on':''}" id="toggleSound"></div>
       </div>
+      <div class="setting-row" id="pdfTextRow">
+        <label>PDF 按文字阅读</label>
+        <div class="toggle ${s.pdfTextMode?'on':''}" id="togglePdfText"></div>
+      </div>
     </div>
     <div class="settings-group">
       <div class="settings-group-title">护眼</div>
@@ -2012,6 +2037,9 @@ function renderSettings(body) {
   });
   body.querySelectorAll('.seg-btn[data-anim]').forEach(el => el.onclick = () => { s.animType = el.dataset.anim; saveState(); renderSettings(body); });
   body.querySelector('#toggleShadow').onclick = function() { s.pageShadow = !s.pageShadow; saveState(); renderSettings(body); };
+  body.querySelector('#togglePdfText').onclick = function() {
+    s.pdfTextMode = !s.pdfTextMode; applySettings(); saveState(); renderSettings(body);
+  };
   body.querySelector('#toggleSound').onclick = function() { s.flipSound = !s.flipSound; saveState(); renderSettings(body); };
   body.querySelector('#setWarm').oninput = e => { s.warmLight = +e.target.value; document.getElementById('valWarm').textContent = Math.round(e.target.value*100)+'%'; applySettings(); };
   body.querySelectorAll('.mode-tab[data-shelf]').forEach(el => el.onclick = () => { s.shelfView = el.dataset.shelf; saveState(); renderSettings(body); renderBookshelf(); });
@@ -2413,7 +2441,7 @@ function renderImport(body) {
       <div class="spinner"></div>
       <span id="importProgressText">正在处理…</span>
     </div>
-    <input type="file" id="fileInput" multiple accept=".txt,.epub,.html,.htm,.md,.markdown,.pdf,.pptx,.ppt,.docx,.doc,.xlsx,.xls,.rtf,.cbr,.cbz,.fb2,.azw3,.mobi,.odt,.ods,.odp" style="display:none">
+    <input type="file" id="fileInput" multiple accept=".txt,.epub,.html,.htm,.md,.markdown,.pdf,.pptx,.ppt,.docx,.doc,.xlsx,.xls,.rtf,.cbr,.cbz,.fb2,.azw3,.mobi,.odt,.ods,.odp,.jpg,.jpeg,.png,.gif,.webp,.bmp,.avif" style="display:none">
     <input type="file" id="importDataFile" accept=".json" style="display:none">
   `;
   
@@ -2628,6 +2656,220 @@ function loadPdfJs() {
   return pdfJsPromise;
 }
 
+/* ================= PDF 原样阅读（页图模式） =================
+   手机上的 PDF 阅读器是"逐页看原书扫描图"，不是把文字抽出来重排。
+   这里按需要页渲染：每页一章，翻到哪页才渲染哪一页，20MB 的扫描书也不炸内存。
+   ============================================================= */
+const pdfDocCache = {};
+const IMAGE_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'avif'];
+
+function blobToDataURL(blob) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(String(fr.result || ''));
+    fr.onerror = () => reject(fr.error || new Error('读取图片失败'));
+    fr.readAsDataURL(blob);
+  });
+}
+
+/* ---------- MuPDF(WASM)：中文老 PDF 的字体没有内嵌，pdf.js 会把字画成乱码，
+   同一套引擎（PyMuPDF）渲染是正常的，所以原页模式用 MuPDF。只有真要逐页看时才加载。 */
+let muPdfPromise = null;
+const mupdfDocCache = {};
+
+function loadMuPdf() {
+  if (window.__mupdfLib) return Promise.resolve(window.__mupdfLib);
+  if (muPdfPromise) return muPdfPromise;
+  muPdfPromise = import(new URL('mupdf/mupdf.js', document.baseURI).href).then(async (mod) => {
+    const lib = mod;
+    if (lib && typeof lib.default === 'object' && lib.default && lib.default.Document) {
+      // 兼容 default 导出
+      window.__mupdfLib = lib.default;
+    } else {
+      window.__mupdfLib = lib;
+    }
+    // Emscripten 模块需要等 wasm 初始化
+    if (typeof window.__mupdfLib.setLogLevel === 'undefined' && window.__mupdfLib.mupdf) {
+      window.__mupdfLib = window.__mupdfLib.mupdf;
+    }
+    return window.__mupdfLib;
+  }).catch(err => { muPdfPromise = null; throw err; });
+  return muPdfPromise;
+}
+
+function getMupdfDoc(book) {
+  if (mupdfDocCache[book.id]) return Promise.resolve(mupdfDocCache[book.id]);
+  if (!book.pdfBlob) return Promise.reject(new Error('这本书的 PDF 原文件不在本机（可能被浏览器清理了），请重新导入一次'));
+  return loadMuPdf().then(lib => book.pdfBlob.arrayBuffer().then(buf => {
+    const u8 = new Uint8Array(buf);
+    const doc = lib.Document.openDocument(u8, 'application/pdf');
+    mupdfDocCache[book.id] = doc;
+    return doc;
+  }));
+}
+
+let pdfPageObjectUrl = null;
+
+function pdfDocOptions(buf) {
+  return { data: new Uint8Array(buf), cMapUrl: 'pdf/cmaps/', cMapPacked: true, useSystemFonts: true };
+}
+
+function getPdfDoc(book) {
+  if (pdfDocCache[book.id]) return Promise.resolve(pdfDocCache[book.id]);
+  if (!book.pdfBlob) return Promise.reject(new Error('这本书的 PDF 原文件不在本机（可能被浏览器清理了），请重新导入一次'));
+  return loadPdfJs()
+    .then(lib => book.pdfBlob.arrayBuffer().then(buf => lib.getDocument(pdfDocOptions(buf)).promise))
+    .then(doc => { pdfDocCache[book.id] = doc; return doc; });
+}
+
+async function parsePdfBook(file) {
+  const lib = await loadPdfJs();
+  const buf = await file.arrayBuffer();
+  const doc = await lib.getDocument(pdfDocOptions(buf)).promise;
+  const n = doc.numPages;
+  const title = file.name.replace(/\.pdf$/i, '');
+
+  // 抽 4 页看有没有文字层：判断扫描件 / 原生 PDF
+  let sample = '';
+  const probes = [1, Math.ceil(n / 4), Math.ceil(n / 2), n].filter((v, i, a) => v >= 1 && v <= n && a.indexOf(v) === i);
+  for (const p of probes) {
+    try {
+      const pg = await doc.getPage(p);
+      const tc = await pg.getTextContent();
+      sample += (tc.items || []).map(it => it.str).join('') + '\n';
+    } catch (e) { /* 单页失败不影响整体 */ }
+  }
+  const hasTextLayer = sample.replace(/[\s\u3000]/g, '').length > 80;
+
+  // 用户主动选了"文字模式"：抽文字重排
+  if (state.settings.pdfTextMode) {
+    const res = await extractPdfText(file);
+    let text = fixPdfGbkText(res.text || '');
+    let engine = 'pdf.js';
+    // pdf.js 读坏了（乱码 / 大量问号）就换 MuPDF 再抽一次
+    if (!text.trim() || textLooksGarbled(text) || replacementRatio(text) > 0.02) {
+      const alt = await extractPdfTextMupdf(file).catch(() => '');
+      if (alt && !textLooksGarbled(alt) && replacementRatio(alt) < replacementRatio(text || '')) {
+        text = alt;
+        engine = 'MuPDF';
+      }
+    }
+    if (!text.trim() || textLooksGarbled(text)) {
+      throw new Error('这个 PDF 抽不出可用文字（多半是扫描件）。请在设置里关掉「PDF 按文字阅读」，用原页阅读打开。');
+    }
+    const chapters = splitTextIntoChapters(text);
+    return {
+      title, author: '佚名', cover: 'imported', format: 'pdf', lang: detectLang(text), chapters,
+      note: 'PDF 文字模式 · 共 ' + n + ' 页 · 文字层由 ' + engine + ' 提取' + (res.truncated ? '（仅前 2000 页）' : ''),
+    };
+  }
+
+  // 默认：原页阅读，每页一章
+  const chapters = [];
+  for (let i = 1; i <= n; i++) chapters.push({ title: '第 ' + i + ' 页', body: '', pdfPage: i });
+  return {
+    title, author: '佚名', cover: 'imported', format: 'pdf', lang: 'zh',
+    chapters, pdfMode: 'pages', pageCount: n, pdfBlob: file, hasTextLayer,
+    note: 'PDF 原样阅读 · 共 ' + n + ' 页' + (hasTextLayer ? '（含文字层，可切文字模式）' : '（扫描版，逐页显示原图）'),
+  };
+}
+
+async function parseImageBook(file, name) {
+  const dataUrl = await blobToDataURL(file);
+  return {
+    title: name.replace(/[.][^.]+$/, ''), author: '佚名', cover: 'imported', format: 'image', lang: 'other',
+    chapters: [{ title: '图片', body: '', imageUrl: dataUrl }],
+  };
+}
+
+/* 把某一页 PDF 渲染出来放进正文区 */
+function renderPdfPage(chIdx, ch) {
+  const inner = document.getElementById('readerInner');
+  const book = state.currentBook;
+  const pageNo = ch.pdfPage;
+  inner.innerHTML = '<div class="pdf-page-wrap" id="pdfPageWrap"><div class="pdf-page-status">正在渲染第 ' + pageNo + ' 页…<br>（首次打开要先下载 PDF 排版引擎，稍等一下）</div></div>';
+  document.getElementById('topbarBook').textContent = book.title || '';
+  document.getElementById('topbarChapter').textContent = ch.title || ('第 ' + pageNo + ' 页');
+  renderHighlightsForChapter(chIdx);
+  updateProgress();
+  setReaderMode();
+  saveState();
+
+  const mount = (node, extra) => {
+    const wrap = document.getElementById('pdfPageWrap');
+    if (!wrap || state.currentChapter !== chIdx) return false;
+    wrap.innerHTML = '';
+    wrap.appendChild(node);
+    if (extra) wrap.appendChild(extra);
+    updateProgress();
+    saveState();
+    return true;
+  };
+
+  getMupdfDoc(book).then(doc => {
+    if (state.currentChapter !== chIdx) return null;        // 用户已经翻走了
+    const page = doc.loadPage(pageNo - 1);
+    const b = page.getBounds();
+    const pw = b[2] - b[0];
+    const content = document.getElementById('readerContent');
+    let avail = Math.min((content.clientWidth || 420) - 8, state.settings.contentWidth || 640);
+    if (avail < 220) avail = Math.min((window.innerWidth || 420) - 16, 640);
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const zoom = (avail / pw) * dpr;
+    const lib = window.__mupdfLib;
+    const pix = page.toPixmap(lib.mupdf ? lib.mupdf.Matrix.scale(zoom, zoom) : lib.Matrix.scale(zoom, zoom),
+      lib.mupdf ? lib.mupdf.ColorSpace.DeviceRGB : lib.ColorSpace.DeviceRGB, false, true);
+    const png = pix.asPNG();
+    if (pdfPageObjectUrl) { try { URL.revokeObjectURL(pdfPageObjectUrl); } catch (e) { } }
+    pdfPageObjectUrl = URL.createObjectURL(new Blob([png], { type: 'image/png' }));
+    const img = document.createElement('img');
+    img.src = pdfPageObjectUrl;
+    img.alt = '第 ' + pageNo + ' 页';
+    img.style.width = '100%';
+    img.style.height = 'auto';
+    const tip = book.chapters[chIdx + 1] ? (() => {
+      const d = document.createElement('div');
+      d.className = 'pdf-page-next';
+      d.textContent = '下滑继续看第 ' + (pageNo + 1) + ' 页';
+      return d;
+    })() : null;
+    mount(img, tip);
+    return null;
+  }).catch(err => {
+    console.warn('MuPDF 渲染失败，退回 pdf.js', err);
+    return renderPdfPageFallback(chIdx, ch).catch(e2 => {
+      const wrap = document.getElementById('pdfPageWrap');
+      if (wrap) wrap.innerHTML = '<div class="pdf-page-status">第 ' + pageNo + ' 页渲染失败：' + escapeHtml((e2 && e2.message) || String(e2)) + '</div>';
+    });
+  });
+}
+
+/* 备用渲染：仓库自带的 pdf.js（扫描件没问题；个别不内嵌中文字体的 PDF 可能显示乱码） */
+function renderPdfPageFallback(chIdx, ch) {
+  const book = state.currentBook;
+  const pageNo = ch.pdfPage;
+  return getPdfDoc(book).then(async doc => {
+    if (state.currentChapter !== chIdx) return;
+    const page = await doc.getPage(pageNo);
+    const base = page.getViewport({ scale: 1 });
+    const content = document.getElementById('readerContent');
+    let avail = Math.min((content.clientWidth || 420) - 8, state.settings.contentWidth || 640);
+    if (avail < 220) avail = Math.min((window.innerWidth || 420) - 16, 640);
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const vp = page.getViewport({ scale: (avail / base.width) * dpr });
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(vp.width);
+    canvas.height = Math.round(vp.height);
+    canvas.style.width = '100%';
+    canvas.style.height = 'auto';
+    await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
+    const wrap = document.getElementById('pdfPageWrap');
+    if (!wrap || state.currentChapter !== chIdx) return;
+    wrap.innerHTML = '';
+    wrap.appendChild(canvas);
+  });
+}
+
 function textLooksGarbled(text) {
   const sample = String(text || '').slice(0, 3000);
   if (!sample) return true;
@@ -2646,6 +2888,66 @@ function textLooksGarbled(text) {
     bad++;
   }
   return total ? bad / total > 0.25 : true;
+}
+
+/* 老中文 PDF 的文字层常是 GBK 字节被当成 Latin-1 塞进 ToUnicode：
+   直接读出来是 "¹ØÓÚ¾ÀÕý" 这种，按 GB18030 还原一次就正常了。*/
+function fixPdfGbkText(text) {
+  const t = String(text || '');
+  if (!t) return t;
+  const countCjk = s => {
+    let n = 0;
+    for (let i = 0; i < s.length; i++) {
+      const c = s.charCodeAt(i);
+      if (c >= 0x4E00 && c <= 0x9FFF) n++;
+    }
+    return n;
+  };
+  // 已经是正常中文就别动
+  if (countCjk(t) > t.length * 0.05) return t;
+  // 把每个字符当回一个字节，按 GB18030 解一次
+  const bytes = new Uint8Array(t.length);
+  for (let i = 0; i < t.length; i++) {
+    const c = t.charCodeAt(i);
+    bytes[i] = c <= 0xFF ? c : 0x3F;
+  }
+  let decoded = '';
+  try { decoded = new TextDecoder('gb18030', { fatal: false }).decode(bytes); } catch (e) { return t; }
+  const before = countCjk(t), after = countCjk(decoded);
+  // 转码后汉字明显变多才采用，避免把正常文本改坏
+  return after > before + 20 ? decoded : t;
+}
+
+/* 抽取结果里残留替换符/问号的比例，超过就认为不可靠 */
+function replacementRatio(text) {
+  const s = String(text || '');
+  let bad = 0, total = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c === 32 || c === 9 || c === 10 || c === 13) continue;
+    total++;
+    if (c === 0xFFFD || c === 0x3F) bad++;
+  }
+  return total ? bad / total : 1;
+}
+
+/* 用 MuPDF 抽文字：中文老 PDF 的文字层被 pdf.js 读坏时靠它兜底 */
+async function extractPdfTextMupdf(file) {
+  const lib = await loadMuPdf();
+  const buf = await file.arrayBuffer();
+  const doc = lib.Document.openDocument(new Uint8Array(buf), 'application/pdf');
+  const n = doc.countPages();
+  let out = '';
+  for (let i = 0; i < n; i++) {
+    try {
+      const page = doc.loadPage(i);
+      const st = page.toStructuredText('preserve-whitespace');
+      out += st.asText().replace(/\s*\n\s*/g, '\n').trim() + '\n\n';
+    } catch (e) { /* 单页失败跳过 */ }
+    if (i % 30 === 0) await new Promise(r => setTimeout(r, 0));
+  }
+  try { if (doc.destroy) doc.destroy(); } catch (e) { }
+  return out;
 }
 
 function extractPdfText(file) {
@@ -2700,7 +3002,7 @@ function idbPutBook(book) {
   return openBookDB().then(db => new Promise((resolve, reject) => {
     const tx = db.transaction(BOOK_STORE, 'readwrite');
     const st = tx.objectStore(BOOK_STORE);
-    const req = st.put({ id: book.id, title: book.title, chapters: book.chapters, savedAt: Date.now() });
+    const req = st.put({ id: book.id, title: book.title, chapters: book.chapters, pdfBlob: book.pdfBlob || null, savedAt: Date.now() });
     req.onsuccess = () => resolve(true);
     req.onerror = () => reject(req.error || new Error('写入失败'));
     tx.onabort = () => reject(tx.error || new Error('写入被中断（可能是空间不足）'));
@@ -2728,7 +3030,7 @@ function idbDeleteBook(id) {
 // 只保留元信息，正文交给 IndexedDB
 function bookMetaOnly(book) {
   const meta = {};
-  Object.keys(book).forEach(k => { if (k !== 'chapters') meta[k] = book[k]; });
+  Object.keys(book).forEach(k => { if (k !== 'chapters' && k !== 'pdfBlob') meta[k] = book[k]; });
   if (meta.coverData && meta.coverData.length > 200000) delete meta.coverData;
   meta.chapterCount = (book.chapters || []).length;
   meta.storedIn = 'idb';
@@ -2744,6 +3046,7 @@ function loadIdbBook(book) {
       throw new Error('本机找不到这本书的正文，可能被浏览器清理了，请重新导入');
     }
     book.chapters = d.chapters;
+    if (d.pdfBlob) book.pdfBlob = d.pdfBlob;
     return book;
   }).catch(e => {
     hideLazyHint();
@@ -2800,23 +3103,9 @@ function parseFile(file) {
         resolve({ title: name.replace(/\.m?d$/i,''), author:'佚名', cover:'imported', lang:detectLang(text), chapters });
       }).catch(reject);
     } else if (ext === 'pdf') {
-      extractPdfText(file).then(res => {
-        let text = res.text;
-        if (!text.trim()) {
-          throw new Error('这个 PDF 没有文字层（多半是扫描件），请先用 OCR 转成文字，或换 EPUB / TXT 再导入');
-        }
-        const garbled = textLooksGarbled(text);
-        const chapters = splitTextIntoChapters(text);
-        if (chapters.length > 0 && chapters[0].body) {
-          chapters[0].body = chapters[0].body;
-        }
-        resolve({
-          title: name.replace(/\.pdf$/i,''), author:'佚名', cover:'imported', format:'pdf',
-          lang: detectLang(text), chapters,
-          textQuality: garbled ? 'low' : 'ok',
-          note: res.truncated ? ('PDF 共 ' + res.pages + ' 页，仅导入了前 2000 页') : '',
-        });
-      }).catch(reject);
+      parsePdfBook(file).then(resolve).catch(reject);
+    } else if (IMAGE_EXTS.indexOf(ext) >= 0) {
+      parseImageBook(file, name).then(resolve).catch(reject);
     } else if (ext === 'pptx' || ext === 'ppt') {
       parseOfficeXml(file, 'pptx').then(resolve).catch(reject);
     } else if (ext === 'docx' || ext === 'doc') {
@@ -3356,7 +3645,8 @@ async function parseComicArchive(file, ext) {
       for (let i = 0; i < imgFiles.length; i++) {
         try {
           const blob = await zip.readBlob(imgFiles[i], mimeOf(imgFiles[i]));
-          chapters.push({ title: '第 ' + (i + 1) + ' 页', body: '', imageUrl: URL.createObjectURL(blob) });
+          const dataUrl = await blobToDataURL(blob);
+          chapters.push({ title: '第 ' + (i + 1) + ' 页', body: '', imageUrl: dataUrl });
         } catch (e) {
           chapters.push({ title: '第 ' + (i + 1) + ' 页', body: '[图片加载失败]' });
         }

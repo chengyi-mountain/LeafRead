@@ -748,7 +748,24 @@ mark { background:var(--accent); color:#fff; padding:0 2px; border-radius:2px; }
   border-radius:3px;
   box-shadow:inset 3px 0 0 var(--tts-hl-bar, rgba(139,111,71,.5));
   transition:background .2s;
+  cursor:grab;
+  -webkit-user-select:none; user-select:none;
 }
+.tts-current.tts-dragging { cursor:grabbing; background:rgba(139,111,71,.26); }
+/* 拖动朗读起点：落在哪一段就框住哪一段 */
+#readerInner .tts-drag-target {
+  outline:2px dashed rgba(139,111,71,.75);
+  outline-offset:4px;
+  border-radius:6px;
+  background:rgba(139,111,71,.10);
+}
+#ttsDropHint {
+  position:fixed; z-index:520; display:none; pointer-events:none;
+  padding:6px 12px; border-radius:16px; font-size:12px; line-height:1.3;
+  background:rgba(24,24,24,.86); color:#fff; white-space:nowrap;
+  box-shadow:0 4px 16px rgba(0,0,0,.18);
+}
+#ttsDropHint.show { display:block; }
 .tts-select {
   flex:1; min-width:0; max-width:190px; font-size:12px; padding:5px 8px;
   border-radius:8px; border:1px solid var(--border-strong); background:var(--bg-elev);
@@ -1280,6 +1297,7 @@ mark { background:var(--accent); color:#fff; padding:0 2px; border-radius:2px; }
     <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
   </button>
 </div>
+<div id="ttsDropHint">松手：从这里开始读</div>
 
 <!-- Tooltip -->
 <div class="word-tip" id="wordTip">
@@ -5016,28 +5034,30 @@ function ttsWriteSpeed(sentence) {
   bar.textContent = sentence;
   bar.classList.add('show');
 }
-function ttsHighlight(sentence) {
+function ttsHighlight(sentence, paraEl) {
   ttsWriteSpeed(sentence);
   document.querySelectorAll('.tts-current').forEach(el => el.classList.remove('tts-current'));
+  const paras = [...document.querySelectorAll('#readerInner .chapter-body p')];
+  let hit = paraEl || null;
   const flat = String(sentence || '').replace(/\s+/g, '');
-  if (!flat) return;
-  const paras = document.querySelectorAll('#readerInner .chapter-body p');
-  let hit = null;
-  // 先按「段落开头」找：句子跨了段（比如带章节标题）也能命中
-  for (let i = 0; i < paras.length && !hit; i++) {
-    const t = paras[i].textContent.replace(/\s+/g, '');
-    if (t.length >= 4 && flat.indexOf(t.slice(0, 6)) >= 0) hit = paras[i];
-  }
-  // 兜底：拿句子里的几段候选去段落正文里找
-  if (!hit && flat.length >= 4) {
-    const cands = [0, 4, 8].map(off => flat.slice(off, off + 12)).filter(s => s.length >= 4);
-    for (let i = 0; i < paras.length && !hit; i++) {
-      const t = paras[i].textContent.replace(/\s+/g, '');
-      if (cands.some(c => t.indexOf(c) >= 0)) hit = paras[i];
+  if (!hit && flat) {
+    // 从当前所在段往后找（读长章节时不会一直跳回前面重复的短句）
+    const start = Math.max(0, Math.min(paras.length - 1, state.tts.paraIdx || 0));
+    const tryHit = p => {
+      const t = p.textContent.replace(/\s+/g, '');
+      if (t.length >= 4 && flat.indexOf(t.slice(0, 6)) >= 0) return true;
+      if (flat.length < 4) return false;
+      return [0, 4, 8].map(off => flat.slice(off, off + 12)).filter(s => s.length >= 4).some(c => t.indexOf(c) >= 0);
+    };
+    for (let k = 0; k < paras.length && !hit; k++) {
+      const p = paras[(start + k) % paras.length];
+      if (tryHit(p)) hit = p;
     }
   }
   if (hit) {
     hit.classList.add('tts-current');
+    const at = paras.indexOf(hit);
+    if (at >= 0) state.tts.paraIdx = at;
     try { hit.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) { }
   }
 }
@@ -5057,7 +5077,18 @@ function ttsLoadChapter(ch) {
 }
 function ttsCancel(then) {
   try { speechSynthesis.cancel(); } catch (e) { }
-  if (typeof then === 'function') setTimeout(then, 90);   // 立刻 cancel+speak 在 Chrome 上会吞掉第一句
+  // Chrome/Edge：cancel 之后引擎还可能停在 paused 或残留队列，直接 speak 会被吞掉
+  try { speechSynthesis.resume(); } catch (e) { }
+  if (typeof then !== 'function') return;
+  // 等引擎真正空下来再开口（最多约 1.2 秒），避免「停止后重播没声音」
+  let tries = 0;
+  const ready = () => {
+    let busy = false;
+    try { busy = !!(speechSynthesis.speaking || speechSynthesis.pending); } catch (e) { }
+    if (busy && tries < 15) { tries++; setTimeout(ready, 80); return; }
+    then();
+  };
+  setTimeout(ready, 70);
 }
 function toggleTTS() {
   if (state.tts.active) { stopTTS(); return; }
@@ -5072,6 +5103,12 @@ function startTTS() {
   if (!raw.trim()) { toast('这一页是图片，没有可朗读的文字', 'error'); return; }
   ttsLoadChapter(ch);
   if (!state.tts.sentences.length) { toast('这一章没有可朗读的文字', 'error'); return; }
+  // 同一章里「停止」后再点朗读：接着上次停下的那一句，而不是从头
+  const key = (book.id || book.title || '') + ':' + state.currentChapter;
+  if (state.tts.resumeKey === key && state.tts.resumeIndex > 0 && state.tts.resumeIndex < state.tts.sentences.length) {
+    state.tts.currentIndex = state.tts.resumeIndex;
+  }
+  state.tts.resumeKey = key;
 
   state.tts.active = true;
   state.tts.paused = false;
@@ -5110,11 +5147,19 @@ function ttsPlayCurrent() {
     if (gen !== (state.tts.gen || 0)) return;
     const err = (e && e.error) || '';
     if (err === 'interrupted' || err === 'canceled') return;
+    // 偶尔被引擎拒一次（not-allowed / synthesis-failed）：先原句重试两次，别一口气跳过整章
+    state.tts.errCount = (state.tts.errCount || 0) + 1;
+    if (state.tts.errCount <= 2) { state.tts.timer = setTimeout(ttsPlayCurrent, 450); return; }
+    state.tts.errCount = 0;
     state.tts.currentIndex++;
-    state.tts.timer = setTimeout(ttsPlayCurrent, 120);
+    state.tts.timer = setTimeout(ttsPlayCurrent, 150);
   };
   state.tts.utter = u;
   state.tts.lastSpeakAt = Date.now();
+  state.tts.speakAt = Date.now();
+  state.tts.started = false;
+  u.onstart = () => { state.tts.started = true; state.tts.errCount = 0; };
+  try { if (speechSynthesis.paused) speechSynthesis.resume(); } catch (e) { }
   speechSynthesis.speak(u);
 }
 function ttsNextChapter() {
@@ -5131,11 +5176,17 @@ function ttsEnsureWatchdog() {
   if (state.tts.watch) clearInterval(state.tts.watch);
   state.tts.watch = setInterval(() => {
     if (!state.tts.active || state.tts.paused) return;
-    if (speechSynthesis.speaking || speechSynthesis.pending) return;
-    if (Date.now() - (state.tts.lastSpeakAt || 0) > 3500) ttsPlayCurrent();
-  }, 3000);
+    if (speechSynthesis.speaking) return;
+    const since = Date.now() - (state.tts.speakAt || state.tts.lastSpeakAt || 0);
+    // pending 却迟迟不开口（引擎被 cancel 卡住）→ 重排一次
+    if (speechSynthesis.pending) { if (since > 4000) ttsCancel(() => ttsPlayCurrent()); return; }
+    if (since > 3500) ttsCancel(() => ttsPlayCurrent());
+  }, 2000);
 }
 function stopTTS() {
+  // 记住停在哪一句，下次同章朗读接着读
+  state.tts.resumeKey = (state.currentBook && (state.currentBook.id || state.currentBook.title) || '') + ':' + state.currentChapter;
+  state.tts.resumeIndex = state.tts.currentIndex || 0;
   state.tts.active = false;
   state.tts.paused = false;
   clearTimeout(state.tts.timer);
@@ -5157,8 +5208,43 @@ function resumeTTS() {
   speechSynthesis.resume();
   if (!speechSynthesis.speaking) ttsCancel(() => ttsPlayCurrent());
 }
-function nextTTSSentence() {
-  if (!state.tts.active) return;
+// 段落 -> 句子索引：按累积字数对齐（句子表就是同一段文字的切分，字数对得上）
+function ttsSentenceIndexForPara(para) {
+  const sents = state.tts.sentences || [];
+  const paras = [...document.querySelectorAll('#readerInner .chapter-body p')];
+  const at = paras.indexOf(para);
+  if (at < 0 || !sents.length) return -1;
+  const flat = s => String(s || '').replace(/\s+/g, '');
+  let paraChars = 0;
+  for (let i = 0; i < at; i++) paraChars += flat(paras[i].textContent).length;
+  let acc = 0;
+  for (let i = 0; i < sents.length; i++) {
+    const len = flat(sents[i]).length;
+    if (len === 0) continue;
+    if (acc + len > paraChars) return i;
+    acc += len;
+  }
+  // 字数超了（章节标题被剔除等）：落到最接近末尾的句子
+  return sents.length - 1;
+}
+function ttsJumpToSentence(idx, label, para) {
+  const list = state.tts.sentences || [];
+  if (idx < 0 || idx >= list.length) return false;
+  clearTimeout(state.tts.timer);
+  state.tts.gen = (state.tts.gen || 0) + 1;
+  state.tts.currentIndex = idx;
+  state.tts.paused = false;
+  document.getElementById('ttsBar').classList.add('show');
+  ttsHighlight(list[idx], para || null);
+  if (state.tts.active) {
+    try { speechSynthesis.resume(); } catch (e) { }
+    ttsCancel(() => { if (state.tts.active) ttsPlayCurrent(); });
+    toast('从「' + String(label || list[idx] || '').slice(0, 12) + '」开始读');
+  }
+  return true;
+}
+
+function nextTTSSentence() {  if (!state.tts.active) return;
   clearTimeout(state.tts.timer);
   state.tts.gen = (state.tts.gen || 0) + 1;
   if (state.tts.currentIndex < state.tts.sentences.length - 1) state.tts.currentIndex++;
@@ -5569,15 +5655,73 @@ function bindEvents() {
   // 滚动模式：轻点正文呼出 / 收起顶栏（刚滑动过、或正在选字时不触发）
   const contentEl = document.getElementById('readerContent');
   let lastScrollAt = 0;
+  let ttsDragAt = 0;
   contentEl.addEventListener('scroll', () => { lastScrollAt = Date.now(); }, { passive: true });
   contentEl.addEventListener('click', e => {
     if (state.settings.mode !== 'scroll') return;
     if (Date.now() - lastScrollAt < 500) return;
+    if (Date.now() - ttsDragAt < 700) return;   // 刚拖动过朗读起点，别顺手弹顶栏
     const sel = window.getSelection && window.getSelection();
     if (sel && String(sel).trim().length > 0) return;
     if (e.target && e.target.closest && e.target.closest('a')) return;
     toggleTopbar();
   });
+
+  // ===== 拖动“正在读的那段”换起点 =====
+  (function bindTtsDrag() {
+    const inner = document.getElementById('readerInner');
+    const hint = document.getElementById('ttsDropHint');
+    if (!inner) return;
+    let drag = null;
+    const paraAt = (x, y) => {
+      const stack = document.elementsFromPoint(x, y) || [];
+      for (const el of stack) {
+        const p = el.closest && el.closest('#readerInner p');
+        if (p) return p;
+      }
+      return null;
+    };
+    const clearTargets = () => {
+      inner.querySelectorAll('.tts-drag-target').forEach(el => el.classList.remove('tts-drag-target'));
+    };
+    inner.addEventListener('pointerdown', ev => {
+      if (!state.tts.active) return;
+      const cur = ev.target && ev.target.closest ? ev.target.closest('.tts-current') : null;
+      if (!cur) return;
+      drag = { cur, x0: ev.clientX, y0: ev.clientY, moved: false, para: null };
+      try { cur.setPointerCapture(ev.pointerId); } catch (e) { }
+    }, { passive: true });
+    inner.addEventListener('pointermove', ev => {
+      if (!drag) return;
+      if (!drag.moved && (Math.abs(ev.clientX - drag.x0) + Math.abs(ev.clientY - drag.y0)) > 10) drag.moved = true;
+      if (!drag.moved) return;
+      drag.cur.classList.add('tts-dragging');
+      clearTargets();
+      const p = paraAt(ev.clientX, ev.clientY);
+      drag.para = p;
+      if (p) p.classList.add('tts-drag-target');
+      if (hint) {
+        hint.classList.toggle('show', !!p);
+        hint.style.left = Math.max(8, Math.min(window.innerWidth - 180, ev.clientX + 14)) + 'px';
+        hint.style.top = Math.max(8, ev.clientY - 46) + 'px';
+      }
+    }, { passive: true });
+    const finish = () => {
+      if (!drag) return;
+      const d = drag; drag = null;
+      d.cur.classList.remove('tts-dragging');
+      clearTargets();
+      if (hint) hint.classList.remove('show');
+      if (!d.moved) return;
+      ttsDragAt = Date.now();
+      if (!d.para) { toast('要拖到正文段落上才行', 'error'); return; }
+      const idx = ttsSentenceIndexForPara(d.para);
+      if (idx < 0) { toast('这一段没对上原文，换一段试试', 'error'); return; }
+      ttsJumpToSentence(idx, String(d.para.textContent || '').replace(/\s+/g, '').slice(0, 12), d.para);
+    };
+    inner.addEventListener('pointerup', finish);
+    inner.addEventListener('pointercancel', finish);
+  })();
   // In paged mode, tapping the screen edges should not show topbar permanently
   const reader2 = document.getElementById('reader');
   reader2.addEventListener('click', e => {

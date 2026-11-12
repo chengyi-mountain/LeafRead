@@ -5400,7 +5400,12 @@ function ttsPlayCurrent() {
   if (idx >= list.length) { return ttsNextChapter(); }
   const text = list[idx];
   const gen = state.tts.gen || 0;
-  ttsHighlight(text);
+  // 关键：高亮要等这句「真正开口」再亮。
+  // 以前在 speak() 之前就切高亮，引擎开口有延迟，视觉上就变成「先亮后读、亮提前一句」。
+  const hlStart = () => {
+    if (!state.tts.active || gen !== (state.tts.gen || 0)) return;
+    if (state.tts.currentIndex === idx) ttsHighlight(text);
+  };
 
   const u = new SpeechSynthesisUtterance(text);
   const v = ttsPickVoice();
@@ -5431,9 +5436,11 @@ function ttsPlayCurrent() {
   state.tts.lastSpeakAt = Date.now();
   state.tts.speakAt = Date.now();
   state.tts.started = false;
-  u.onstart = () => { state.tts.started = true; state.tts.errCount = 0; };
+  u.onstart = () => { state.tts.started = true; state.tts.errCount = 0; hlStart(); };
   try { if (speechSynthesis.paused) speechSynthesis.resume(); } catch (e) { }
   speechSynthesis.speak(u);
+  // 少数引擎不抛 onstart：0.6s 还没开口就先亮着，避免整段没高亮
+  state.tts.hlWait = setTimeout(() => { if (!state.tts.started) hlStart(); }, 600);
 }
 function ttsNextChapter() {
   const book = state.currentBook;
@@ -5469,6 +5476,7 @@ function stopTTS() {
   state.tts.active = false;
   state.tts.paused = false;
   clearTimeout(state.tts.timer);
+  clearTimeout(state.tts.hlWait);
   state.tts.gen = (state.tts.gen || 0) + 1;
   if (state.tts.watch) { clearInterval(state.tts.watch); state.tts.watch = null; }
   try { speechSynthesis.cancel(); } catch (e) { }

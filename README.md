@@ -3,8 +3,8 @@
 > 一个**零依赖、纯离线**的网页阅读器：下载 `reader.html`，双击就能读书。
 > 不用装软件、不用起服务器、不上传任何数据 —— 书和笔记都留在你自己的电脑/手机里。
 
-**在线体验**：[chengyi-mountain.github.io/LeafRead](https://chengyi-mountain.github.io/LeafRead/)
-**直链**：[reader.html](https://chengyi-mountain.github.io/LeafRead/reader.html)
+**在线体验**：https://chengyi-mountain.github.io/LeafRead/reader.html
+
 
 > 分享链接请用 `https://` 开头：微信打开 `http://` 链接会先弹「该页面采用未加密的 HTTP 协议」拦截页，点“继续访问”可进入，但用 https 链接不会有这一层。
 

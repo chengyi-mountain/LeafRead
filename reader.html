@@ -560,7 +560,7 @@ input, textarea, select { font:inherit; color:inherit; }
   position:absolute; top:0; left:0; right:0; bottom:0;
   z-index:50; pointer-events:none;
 }
-.click-zone { flex:1; pointer-events:auto; }
+.click-zone { flex:1; pointer-events:auto; touch-action:none; }  /* 按住高亮句拖动换朗读起点时不抢手势 */
 
 /* Progress bar */
 .progress-wrap {
@@ -755,6 +755,9 @@ mark { background:var(--accent); color:#fff; padding:0 2px; border-radius:2px; }
   transition:background .2s;
   cursor:grab;
   -webkit-user-select:none; user-select:none;
+  /* 按住这一句就是「抓朗读起点」，别让它变成手势滚动 */
+  touch-action:none;
+  -webkit-touch-callout:none;
 }
 /* 逐句高亮（Chrome/Edge/安卓 Chrome 支持）：只给正在读的这一句上底色 */
 ::highlight(tts-read) {
@@ -5602,24 +5605,43 @@ function resumeTTS() {
   ttsKeepAliveStart();
   if (!speechSynthesis.speaking) ttsCancel(() => ttsPlayCurrent());
 }
-// 段落 -> 句子索引：按累积字数对齐（句子表就是同一段文字的切分，字数对得上）
+// 段落 -> 句子索引：先按文字定位（翻页模式只拿得到当前页的段落，按序号算会偏），
+// 文字找不到再退回「累积字数」的老办法。
 function ttsSentenceIndexForPara(para) {
   const sents = state.tts.sentences || [];
+  if (!sents.length || !para) return -1;
+  const flat = s => String(s || '').replace(/\s+/g, '');
+  const all = sents.map(flat);
+  const full = all.join('');
+  // 先按文字定位段落开头在整章里的字符位置（翻页模式只拿得到当前页段落，按序号算会偏）
+  const want = flat(para.textContent);
+  let pos = -1;
+  for (const n of [12, 8, 5]) {
+    if (pos >= 0) break;
+    if (want.length >= n) pos = full.indexOf(want.slice(0, n));
+  }
+  if (pos < 0 && want.length) pos = full.indexOf(want.slice(0, 3));
+  if (pos >= 0) {
+    let acc = 0;
+    for (let i = 0; i < all.length; i++) {
+      if (acc + all[i].length > pos) return i;
+      acc += all[i].length;
+    }
+    return Math.max(0, all.length - 1);
+  }
+  // 退回「段落序号 + 累积字数」的老办法（滚动模式下段落表是全的，这条基本用不到）
   const paras = ttsParagraphs();
   const at = paras.indexOf(para);
-  if (at < 0 || !sents.length) return -1;
-  const flat = s => String(s || '').replace(/\s+/g, '');
+  if (at < 0) return -1;
   let paraChars = 0;
   for (let i = 0; i < at; i++) paraChars += flat(paras[i].textContent).length;
   let acc = 0;
-  for (let i = 0; i < sents.length; i++) {
-    const len = flat(sents[i]).length;
-    if (len === 0) continue;
-    if (acc + len > paraChars) return i;
-    acc += len;
+  for (let i = 0; i < all.length; i++) {
+    if (all[i].length === 0) continue;
+    if (acc + all[i].length > paraChars) return i;
+    acc += all[i].length;
   }
-  // 字数超了（章节标题被剔除等）：落到最接近末尾的句子
-  return sents.length - 1;
+  return all.length - 1;
 }
 function ttsJumpToSentence(idx, label, para) {
   const list = state.tts.sentences || [];
@@ -6047,14 +6069,15 @@ function bindEvents() {
   };
   
   // Reader click zones (paged mode)
-  document.getElementById('clickLeft').onclick = e => { e.stopPropagation(); prevPage(); };
-  document.getElementById('clickRight').onclick = e => { e.stopPropagation(); nextPage(); };
-  document.getElementById('clickCenter').onclick = e => { e.stopPropagation(); toggleTopbar(); };
+  let ttsDragAt = 0;   // 刚拖动过朗读起点的时间戳（用来吞掉随之而来的翻页/顶栏点击）
+  const ttsDragGuard = () => Date.now() - ttsDragAt < 700;
+  document.getElementById('clickLeft').onclick = e => { e.stopPropagation(); if (ttsDragGuard()) return; prevPage(); };
+  document.getElementById('clickRight').onclick = e => { e.stopPropagation(); if (ttsDragGuard()) return; nextPage(); };
+  document.getElementById('clickCenter').onclick = e => { e.stopPropagation(); if (ttsDragGuard()) return; toggleTopbar(); };
 
   // 滚动模式：轻点正文呼出 / 收起顶栏（刚滑动过、或正在选字时不触发）
   const contentEl = document.getElementById('readerContent');
   let lastScrollAt = 0;
-  let ttsDragAt = 0;
   contentEl.addEventListener('scroll', () => {
     lastScrollAt = Date.now();
     // 边看边记：把当前位置写进本地存档（关掉网页下次打开能回到这儿）
@@ -6072,60 +6095,112 @@ function bindEvents() {
     toggleTopbar();
   });
 
-  // ===== 拖动“正在读的那段”换起点 =====
+  // ===== 按住正在读的那一句，拖到想开始读的地方（拖动中可自动滚/翻页） =====
   (function bindTtsDrag() {
-    const inner = document.getElementById('readerInner');
+    const host = document.getElementById('reader') || document.getElementById('readerInner');
+    const content = document.getElementById('readerContent');
     const hint = document.getElementById('ttsDropHint');
-    if (!inner) return;
-    let drag = null;
-    const paraAt = (x, y) => {
-      const stack = document.elementsFromPoint(x, y) || [];
-      for (const el of stack) {
-        const p = el.closest && el.closest('#readerInner p');
-        if (p) return p;
+    if (!host) return;
+    let drag = null, edgeTimer = null, edgeDir = 0;
+
+    const nearestPara = (x, y) => {
+      const paras = ttsParagraphs();
+      let best = null, bestD = Infinity;
+      for (const p of paras) {
+        const r = p.getBoundingClientRect();
+        if (r.height <= 0 || r.width <= 0) continue;
+        const dx = Math.max(r.left - x, 0, x - r.right);
+        const dy = Math.max(r.top - y, 0, y - r.bottom);
+        const d = dx * dx + dy * dy;
+        if (d < bestD) { bestD = d; best = p; }
       }
-      return null;
+      return best;
     };
     const clearTargets = () => {
-      inner.querySelectorAll('.tts-drag-target').forEach(el => el.classList.remove('tts-drag-target'));
+      document.querySelectorAll('.tts-drag-target').forEach(el => el.classList.remove('tts-drag-target'));
     };
-    inner.addEventListener('pointerdown', ev => {
-      if (!state.tts.active) return;
-      const cur = ev.target && ev.target.closest ? ev.target.closest('.tts-current') : null;
-      if (!cur) return;
-      drag = { cur, x0: ev.clientX, y0: ev.clientY, moved: false, para: null };
-      try { cur.setPointerCapture(ev.pointerId); } catch (e) { }
-    }, { passive: true });
-    inner.addEventListener('pointermove', ev => {
-      if (!drag) return;
-      if (!drag.moved && (Math.abs(ev.clientX - drag.x0) + Math.abs(ev.clientY - drag.y0)) > 10) drag.moved = true;
-      if (!drag.moved) return;
-      drag.cur.classList.add('tts-dragging');
-      clearTargets();
-      const p = paraAt(ev.clientX, ev.clientY);
+    const paint = () => {
+      if (!drag || !drag.moved) return;
+      const p = nearestPara(drag.x, drag.y);
       drag.para = p;
+      clearTargets();
       if (p) p.classList.add('tts-drag-target');
       if (hint) {
         hint.classList.toggle('show', !!p);
-        hint.style.left = Math.max(8, Math.min(window.innerWidth - 180, ev.clientX + 14)) + 'px';
-        hint.style.top = Math.max(8, ev.clientY - 46) + 'px';
+        hint.style.left = Math.max(8, Math.min(window.innerWidth - 190, drag.x + 14)) + 'px';
+        hint.style.top = Math.max(8, drag.y - 46) + 'px';
       }
+    };
+    // 手指压到屏幕上下边缘：自动滚动（滚动模式）/ 左右边缘：自动翻页（翻页模式）
+    const tick = () => {
+      if (!drag || !drag.moved) { edgeDir = 0; return; }
+      if (state.settings.mode === 'scroll') {
+        if (drag.y < 120) edgeDir = -1;
+        else if (drag.y > window.innerHeight - 150) edgeDir = 1;
+        else edgeDir = 0;
+        if (edgeDir) {
+          content.scrollTop += edgeDir * 14;
+          paint();
+        }
+      } else {
+        if (drag.x > window.innerWidth * 0.8) edgeDir = 1;
+        else if (drag.x < window.innerWidth * 0.2) edgeDir = -1;
+        else edgeDir = 0;
+        if (edgeDir && !drag.flipAt) {
+          drag.flipAt = true;
+          const g = drag.gen;
+          const apply = () => { if (!drag || drag.gen !== g) return; if (edgeDir > 0) nextPage(); else prevPage(); paint(); };
+          apply();
+          setTimeout(() => { if (drag && drag.gen === g) drag.flipAt = false; }, 700);
+        }
+      }
+    };
+    const stopEdge = () => { clearInterval(edgeTimer); edgeTimer = null; edgeDir = 0; };
+
+    host.addEventListener('pointerdown', ev => {
+      if (!state.tts.active) return;
+      const p0 = nearestPara(ev.clientX, ev.clientY);
+      const cur = document.querySelector('#readerInner .tts-current, #pageCanvas .tts-current');
+      if (!p0 || !cur) return;
+      // 必须按在这句高亮上（含 10px 宽容），按下别处仍按原逻辑处理
+      const r = cur.getBoundingClientRect();
+      const near = ev.clientX >= r.left - 10 && ev.clientX <= r.right + 10 && ev.clientY >= r.top - 10 && ev.clientY <= r.bottom + 10;
+      if (!near) return;
+      drag = { cur, x0: ev.clientX, y0: ev.clientY, x: ev.clientX, y: ev.clientY, moved: false, para: null, flipAt: false, gen: (state.tts.gen || 0) };
+      try { host.setPointerCapture(ev.pointerId); } catch (e) { }
+      stopEdge();
+      edgeTimer = setInterval(tick, 60);
     }, { passive: true });
+
+    host.addEventListener('pointermove', ev => {
+      if (!drag) return;
+      drag.x = ev.clientX; drag.y = ev.clientY;
+      if (!drag.moved && (Math.abs(ev.clientX - drag.x0) + Math.abs(ev.clientY - drag.y0)) > 8) {
+        drag.moved = true;
+        drag.cur.classList.add('tts-dragging');
+      }
+      if (!drag.moved) return;
+      try { ev.preventDefault(); } catch (e) { }
+      paint();
+    }, { passive: false });
+
     const finish = () => {
       if (!drag) return;
       const d = drag; drag = null;
+      stopEdge();
       d.cur.classList.remove('tts-dragging');
       clearTargets();
       if (hint) hint.classList.remove('show');
-      if (!d.moved) return;
-      ttsDragAt = Date.now();
-      if (!d.para) { toast('要拖到正文段落上才行', 'error'); return; }
-      const idx = ttsSentenceIndexForPara(d.para);
+      if (!d.moved) return;             // 只是点了一下，不当拖动
+      ttsDragAt = Date.now();           // 别顺手弹顶栏
+      const para = nearestPara(d.x, d.y) || d.para;   // 松手位置现算，别用翻页前的旧落点
+      if (!para) { toast('要拖到正文段落上才行', 'error'); return; }
+      const idx = ttsSentenceIndexForPara(para);
       if (idx < 0) { toast('这一段没对上原文，换一段试试', 'error'); return; }
-      ttsJumpToSentence(idx, String(d.para.textContent || '').replace(/\s+/g, '').slice(0, 12), d.para);
+      ttsJumpToSentence(idx, String(para.textContent || '').replace(/\s+/g, '').slice(0, 12), para);
     };
-    inner.addEventListener('pointerup', finish);
-    inner.addEventListener('pointercancel', finish);
+    host.addEventListener('pointerup', finish);
+    host.addEventListener('pointercancel', finish);
   })();
   // In paged mode, tapping the screen edges should not show topbar permanently
   const reader2 = document.getElementById('reader');
@@ -6148,6 +6223,7 @@ function bindEvents() {
     touchEndY = e.changedTouches[0].screenY;
     const dx = touchEndX - touchStartX;
     const dy = touchEndY - touchStartY;
+    if (ttsDragGuard()) return;   // 刚在拖动朗读起点，别顺手翻页
     if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.5 && state.settings.mode === 'paged') {
       if (dx < 0) nextPage(); else prevPage();
     }

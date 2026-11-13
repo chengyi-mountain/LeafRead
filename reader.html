@@ -2007,6 +2007,10 @@ function openBookNow(book) {
 }
 
 function switchView(view) {
+  // 离开阅读页之前先把当前位置存好（隐藏时浏览器会把滚动位置归零，别把 0 存进去）
+  if (view === 'bookshelf' && state.currentBook && !document.getElementById('viewReader').classList.contains('hidden')) {
+    updateProgress();
+  }
   document.getElementById('viewBookshelf').classList.toggle('hidden', view !== 'bookshelf');
   document.getElementById('viewReader').classList.toggle('hidden', view !== 'reader');
   document.getElementById('topbar').classList.toggle('floating', view === 'reader');
@@ -2030,11 +2034,52 @@ function chapterBodyText(ch) {
   return stripped.trim().length > 0 ? stripped : body;
 }
 
+/* 把存档位置落回去：字体/图片还没排完时 scrollHeight 偏小，设的值会被钳住，
+   所以隔一小会儿继续对位（最多约 1.8 秒）；用户自己一动就撒手，不把他拽回去。 */
+function restoreReaderPosition(chIdx, prog) {
+  const content = document.getElementById('readerContent');
+  if (!content) { state.progressLock = false; return; }
+  const wantScroll = (prog && prog.scrollY) || 0;
+  const wantPage = (prog && prog.pageIndex) || 0;
+  armRestoreAbort();
+  // 恢复期间关掉平滑滚动，否则每次赋值都会动画，位置迟迟落不到位
+  content.style.scrollBehavior = 'auto';
+  const done = () => { content.style.scrollBehavior = ''; };
+  const applyPos = () => {
+    if (state.currentChapter !== chIdx || state.restoreAbort) return;
+    if (state.settings.mode === 'scroll') {
+      if (wantScroll <= 2) return;
+      const max = content.scrollHeight - content.clientHeight;
+      const want = Math.min(wantScroll, Math.max(0, max));
+      if (Math.abs(content.scrollTop - want) > 6) content.scrollTop = want;
+    } else if (wantPage > 0) {
+      if ((state.pageIndex || 0) !== wantPage) renderPage(wantPage, false);
+    }
+  };
+  setTimeout(() => {
+    applyPos();
+    state.progressLock = false;
+    updateProgress();
+    let tries = 0;
+    const tick = () => {
+      if (state.currentChapter !== chIdx || state.restoreAbort) { done(); return; }
+      applyPos();
+      if (++tries < 12) setTimeout(tick, 150); else done();
+    };
+    setTimeout(tick, 180);
+  }, 60);
+}
+
 function renderChapter(chIdx, restorePos) {
   if (!state.currentBook) return;
   const ch = state.currentBook.chapters[chIdx];
   if (!ch) return;
   state.currentChapter = chIdx;
+  // 先把要恢复到的位置抓一份下来：
+  // 下面 render 过程里会调 updateProgress()，如果把「刚渲染时 scrollTop=0」写回存档，
+  // 存档就被清零了，再想恢复就恢复不回来（这就是以前打开总是第一页的原因）。
+  const restoreProg = restorePos ? Object.assign({}, getProgress(state.currentBook.id)) : null;
+  state.progressLock = !!restorePos;
   
   const inner = document.getElementById('readerInner');
   const titleHtml = ch.title ? `<h2 class="chapter-title">${escapeHtml(ch.title)}</h2>` : '';
@@ -2050,18 +2095,8 @@ function renderChapter(chIdx, restorePos) {
     document.getElementById('topbarChapter').textContent = ch.title || `第 ${chIdx+1} 章`;
     updateProgress();
     setReaderMode();
-    if (restorePos) {
-      const prog = getProgress(state.currentBook.id);
-      const content = document.getElementById('readerContent');
-      setTimeout(() => {
-        if (state.settings.mode === 'scroll') {
-          const max = content.scrollHeight - content.clientHeight;
-          content.scrollTop = Math.min(prog.scrollY || 0, Math.max(0, max));
-        } else {
-          renderPage(prog.pageIndex || 0, false);
-        }
-      }, 50);
-    }
+    if (restorePos) restoreReaderPosition(chIdx, restoreProg);
+    else state.progressLock = false;
     saveState();
     return;
   }
@@ -2088,18 +2123,10 @@ function renderChapter(chIdx, restorePos) {
   if (state.settings.mode === 'paged') renderPage(0, false);
   
   // Restore position
-  if (restorePos) {
-    const prog = getProgress(state.currentBook.id);
-    const content = document.getElementById('readerContent');
-    setTimeout(() => {
-      if (state.settings.mode === 'scroll') {
-        const max = content.scrollHeight - content.clientHeight;
-        content.scrollTop = Math.min(prog.scrollY || 0, Math.max(0, max));
-      } else {
-        renderPage(prog.pageIndex || 0, false);
-      }
-    }, 50);
-  }
+
+  if (restorePos) restoreReaderPosition(chIdx, restoreProg);
+
+  else state.progressLock = false;
   
   saveState();
 }
@@ -2144,6 +2171,21 @@ function applyReaderInset(isPageOnly, paged) {
 }
 
 // Scroll handler -> progress
+function readerViewVisible() {
+  const v = document.getElementById('viewReader');
+  return !!(v && !v.classList.contains('hidden'));
+}
+/* 恢复位置期间如果用户自己动了（滚动/触摸/按键），就立刻放手，别把他拽回去 */
+function armRestoreAbort() {
+  state.restoreAbort = false;
+  const c = document.getElementById('readerContent');
+  if (!c) return;
+  const off = () => {
+    state.restoreAbort = true;
+    ['wheel', 'touchstart', 'pointerdown', 'keydown'].forEach(ev => c.removeEventListener(ev, off));
+  };
+  ['wheel', 'touchstart', 'pointerdown', 'keydown'].forEach(ev => c.addEventListener(ev, off, { passive: true, once: false }));
+}
 function updateProgress() {
   const content = document.getElementById('readerContent');
   const ch = state.currentBook.chapters[state.currentChapter];
@@ -2157,7 +2199,8 @@ function updateProgress() {
   percent = Math.max(0, Math.min(1, percent));
   document.getElementById('progressBar').style.width = (percent * 100) + '%';
   document.getElementById('rbProgress').textContent = Math.round(percent * 100) + '%';
-  
+  if (state.progressLock) return;   // 正在恢复位置：别把 0 写回存档
+  if (!readerViewVisible()) return;  // 阅读页被隐藏时 scrollTop 会被归零，别拿它覆盖存档
   setProgress(state.currentBook.id, {
     chapter: state.currentChapter,
     percent,
@@ -5241,6 +5284,54 @@ function ttsLoadChapter(ch) {
   state.tts.sentences = ttsSplitText(raw);
   state.tts.currentIndex = 0;
 }
+/* ===== 朗读进度存档（按 书+章 记句子号，存在 localStorage） =====
+   这样关掉网页、换天再打开，点朗读还是接着上次那一句，不用从头念。 */
+const TTS_POS_KEY = 'reader_tts_pos_v1';
+function ttsPosMap() {
+  try { return JSON.parse(localStorage.getItem(TTS_POS_KEY) || '{}') || {}; } catch (e) { return {}; }
+}
+function ttsPosKey() {
+  const book = state.currentBook;
+  if (!book) return '';
+  return (book.id || book.title || '') + ':' + (state.currentChapter || 0);
+}
+function ttsSavePos() {
+  const key = ttsPosKey();
+  if (!key || !state.tts.sentences || !state.tts.sentences.length) return;
+  try {
+    const m = ttsPosMap();
+    m[key] = Math.max(0, Math.min(state.tts.sentences.length - 1, state.tts.currentIndex || 0));
+    localStorage.setItem(TTS_POS_KEY, JSON.stringify(m));
+  } catch (e) { }
+}
+function ttsSavedPos(key) {
+  const v = ttsPosMap()[key];
+  return (typeof v === 'number' && v > 0) ? v : 0;
+}
+/* 当前屏幕位置对应的句子号：没存过朗读进度时，从「你眼睛正看的那一段」开始念 */
+function ttsSentenceIndexAtViewport() {
+  const paras = ttsParagraphs();
+  if (!paras.length) return 0;
+  const content = document.getElementById('readerContent');
+  const box = content ? content.getBoundingClientRect() : { top: 0, bottom: 800, left: 0 };
+  const flat = s => String(s || '').replace(/\s+/g, '');
+  let acc = 0, firstOffset = -1;
+  for (let i = 0; i < paras.length; i++) {
+    const r = paras[i].getBoundingClientRect();
+    const visible = (r.bottom > box.top + 4) && (r.top < box.bottom - 60) && (r.height > 0);
+    if (visible && firstOffset < 0) firstOffset = acc;
+    acc += flat(paras[i].textContent).length;
+  }
+  if (firstOffset < 0) return 0;
+  const sents = state.tts.sentences || [];
+  let a = 0;
+  for (let i = 0; i < sents.length; i++) {
+    const len = flat(sents[i]).length;
+    if (a + len > firstOffset) return i;
+    a += len;
+  }
+  return 0;
+}
 function ttsCancel(then) {
   try { speechSynthesis.cancel(); } catch (e) { }
   // Chrome/Edge：cancel 之后引擎还可能停在 paused 或残留队列，直接 speak 会被吞掉
@@ -5372,10 +5463,15 @@ function startTTS() {
   if (!raw.trim()) { toast('这一页是图片，没有可朗读的文字', 'error'); return; }
   ttsLoadChapter(ch);
   if (!state.tts.sentences.length) { toast('这一章没有可朗读的文字', 'error'); return; }
-  // 同一章里「停止」后再点朗读：接着上次停下的那一句，而不是从头
+  // 同一章里「停止」后再点朗读：接着上次停下的那一句，而不是从头。
+  // 关掉网页再打开（内存里没有 resumeKey）时，用本地存档；再没有就从你眼睛正在看的那一段起念。
   const key = (book.id || book.title || '') + ':' + state.currentChapter;
   if (state.tts.resumeKey === key && state.tts.resumeIndex > 0 && state.tts.resumeIndex < state.tts.sentences.length) {
     state.tts.currentIndex = state.tts.resumeIndex;
+  } else {
+    const saved = ttsSavedPos(key);
+    if (saved > 0 && saved < state.tts.sentences.length) state.tts.currentIndex = saved;
+    else state.tts.currentIndex = ttsSentenceIndexAtViewport();
   }
   state.tts.resumeKey = key;
 
@@ -5418,6 +5514,7 @@ function ttsPlayCurrent() {
     if (gen !== (state.tts.gen || 0)) return;
     const isSentenceEnd = /[。！？!?；;]$/.test(text);
     state.tts.currentIndex++;
+    ttsSavePos();
     state.tts.timer = setTimeout(ttsPlayCurrent, isSentenceEnd ? 240 : 100);
   };
   u.onerror = (e) => {
@@ -5445,6 +5542,7 @@ function ttsPlayCurrent() {
 function ttsNextChapter() {
   const book = state.currentBook;
   if (!book) { stopTTS(); return; }
+  ttsSavePos();   // 换章前把这一章的句子号存档
   let n = state.currentChapter + 1;
   while (n < book.chapters.length && !ttsReadableText(book.chapters[n]).trim()) n++;
   if (n >= book.chapters.length) { toast('这本读完了'); stopTTS(); return; }
@@ -5473,6 +5571,7 @@ function stopTTS() {
   // 记住停在哪一句，下次同章朗读接着读
   state.tts.resumeKey = (state.currentBook && (state.currentBook.id || state.currentBook.title) || '') + ':' + state.currentChapter;
   state.tts.resumeIndex = state.tts.currentIndex || 0;
+  ttsSavePos();   // 同时写进本地存档，关掉网页也还在
   state.tts.active = false;
   state.tts.paused = false;
   clearTimeout(state.tts.timer);
@@ -5530,7 +5629,9 @@ function ttsJumpToSentence(idx, label, para) {
   state.tts.currentIndex = idx;
   state.tts.paused = false;
   document.getElementById('ttsBar').classList.add('show');
+  document.body.classList.add('tts-on');
   ttsHighlight(list[idx], para || null);
+  ttsSavePos();
   if (state.tts.active) {
     try { speechSynthesis.resume(); } catch (e) { }
     ttsCancel(() => { if (state.tts.active) ttsPlayCurrent(); });
@@ -5954,7 +6055,13 @@ function bindEvents() {
   const contentEl = document.getElementById('readerContent');
   let lastScrollAt = 0;
   let ttsDragAt = 0;
-  contentEl.addEventListener('scroll', () => { lastScrollAt = Date.now(); }, { passive: true });
+  contentEl.addEventListener('scroll', () => {
+    lastScrollAt = Date.now();
+    // 边看边记：把当前位置写进本地存档（关掉网页下次打开能回到这儿）
+    if (state.progressLock || !readerViewVisible()) return;
+    clearTimeout(state.progressTimer);
+    state.progressTimer = setTimeout(() => { if (state.currentBook && readerViewVisible()) updateProgress(); }, 350);
+  }, { passive: true });
   contentEl.addEventListener('click', e => {
     if (state.settings.mode !== 'scroll') return;
     if (Date.now() - lastScrollAt < 500) return;
